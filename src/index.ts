@@ -20,6 +20,11 @@ export type VariationUpdate = {
 }
 export type Config = VariationUpdate[]
 export type VariantHandler = Config | (() => unknown)
+export type ExperimentOptions = {
+  defaultVariant?: string
+  variants?: Record<string, VariantHandler>
+  debug?: boolean
+}
 
 
 
@@ -29,17 +34,17 @@ export class Experiment {
   private readyPromise: Promise<string>;
   private ran: boolean = false;
   private defaultVariant: string = 'control';
+  private readonly debug: boolean
+
   constructor(
     private readonly featureFlag: string,
-    initialConfig?: {
-      defaultVariant?: string
-      variants?: Record<string, VariantHandler>,
-    }
+    initialConfig: ExperimentOptions = {},
   ) {
-    if (initialConfig?.defaultVariant)
+    this.debug = initialConfig.debug ?? false
+    if (initialConfig.defaultVariant)
       this.defaultVariant = initialConfig.defaultVariant;
-    if (initialConfig?.variants) {
-      Object.entries(initialConfig?.variants).forEach(([variant, handler]) => {
+    if (initialConfig.variants) {
+      Object.entries(initialConfig.variants).forEach(([variant, handler]) => {
         this.on(variant, handler);
       })
     }
@@ -101,7 +106,7 @@ export class Experiment {
 
     const posthog = this.getPostHog()
     if (!posthog) {
-      console.warn(
+      this.warn(
         `PostHog is unavailable. Applying '${this.defaultVariant}' by default.`,
       )
       return Promise.resolve(this.defaultVariant)
@@ -130,7 +135,7 @@ export class Experiment {
         // PostHog may invoke the callback synchronously before returning the cleanup function.
         if (unsubscribeWhenAvailable) unsubscribe()
       } catch (error) {
-        console.warn(
+        this.warn(
           `Could not resolve feature flag '${this.featureFlag}'. Applying '${this.defaultVariant}'.`,
           error,
         )
@@ -150,7 +155,7 @@ export class Experiment {
   private getConfiguredVariantOrDefault(variant: string): string {
     if (this.variants.has(variant)) return variant
 
-    console.warn(
+    this.warn(
       `Variant '${variant}' is not configured for '${this.featureFlag}'. Applying '${this.defaultVariant}'.`,
     )
     return this.defaultVariant
@@ -171,7 +176,7 @@ export class Experiment {
 
     const handlers = this.variants.get(this.activeVariant)
     if (!handlers) {
-      console.warn(
+      this.warn(
         `Default variant '${this.activeVariant}' is not configured for '${this.featureFlag}'.`,
       )
       return
@@ -194,7 +199,7 @@ export class Experiment {
   private applyUpdates(selector: string, updates: VariationUpdate['updates']): void {
     const elements = document.querySelectorAll<HTMLElement>(selector)
     if (!elements.length) {
-      console.warn('No elements found for selector:', selector)
+      this.warn('No elements found for selector:', selector)
       return
     }
 
@@ -212,6 +217,10 @@ export class Experiment {
       if (updates.innerHTML !== undefined) element.innerHTML = updates.innerHTML
       if (updates.callback) updates.callback(element, this.activeVariant!)
     })
+  }
+
+  private warn(...args: unknown[]): void {
+    if (this.debug) console.warn(...args)
   }
 }
 export function createExperiment(...args: ConstructorParameters<typeof Experiment>): Experiment {

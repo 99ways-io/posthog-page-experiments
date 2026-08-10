@@ -1,6 +1,7 @@
 import { createExperiment } from '../src'
 
 const experiment = createExperiment('example-all-configurations', {
+  debug: true,
   defaultVariant: 'baseline',
   variants: {
     'copy-test': [

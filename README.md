@@ -1,6 +1,6 @@
-# A/B Experiment SDK
+# A/B Experiment Kit
 
-A small browser SDK for running A/B experiments backed by PostHog feature flags. Define what each variant should do to the DOM (or run arbitrary code), and the SDK resolves the user's variant from PostHog, waits for the DOM to be ready, then applies it.
+A small kit for running A/B experiments backed by PostHog feature flags. Define what each variant should do to the DOM (or run arbitrary code), and the kit resolves the user's variant from PostHog, waits for the DOM to be ready, then applies it.
 
 ## Install & build
 
@@ -21,6 +21,7 @@ Include the built bundle in your page, then create an experiment and pass the in
 </script>
 <script>
   createExperiment('01-checkout-message-feature-flag', {
+    debug: false,
     variants: {
       control: [],
       test_group_1: [
@@ -66,6 +67,7 @@ See the [examples](./examples/README.md) for more.
 - `featureFlag`: the PostHog feature flag key for this experiment.
 - `options.defaultVariant`: variant to fall back to when PostHog is unavailable, the flag resolves to an unregistered variant, or the flag value is `false`/`undefined`/`''`. Defaults to `'control'`. Optional.
 - `options.variants`: a map of variant name → handler, registered up front. Optional.
+- `options.debug`: enables diagnostic warnings for PostHog failures, unknown variants, missing default configurations, and unmatched selectors. Defaults to `false`. Optional.
 
 Returns an `Experiment` instance.
 
@@ -75,7 +77,7 @@ Registers a config/handler for a variant. Can be called multiple times for the s
 
 A handler is either:
 - **An array of DOM updates** (`VariationUpdate[]`), each with:
-  - `selector`: a CSS selector; the update applies to every matching element. If nothing matches, a warning is logged and that update is skipped.
+  - `selector`: a CSS selector; the update applies to every matching element. If nothing matches, that update is skipped and a warning is logged when `debug` is enabled.
   - `updates.style`: an object of CSS properties to set with `!important`. camelCase keys (`backgroundColor`) are converted to kebab-case automatically; custom properties (`--my-var`) are passed through as-is.
   - `updates.innerText` / `updates.innerHTML`: set directly on the element if provided.
   - `updates.callback(element, variant)`: called per matched element with the element and the active variant name. You can use it for anything that declarative options (`styles, innerText, innerHTML`) don't cover.
@@ -124,8 +126,8 @@ Resolves the variant, applies it and returns the resolved variant name.
 1. **Resolve the variant**, in order:
    - A query parameter matching the feature flag name, if present (see "Testing in production" below).
    - Otherwise, `window.posthog.getFeatureFlag(featureFlag)`, once PostHog's flags are ready. A flag value of `true` maps to `'test'`; `false`, `undefined`, or `''` maps to `defaultVariant`; any other string is used as-is.
-   - If `window.posthog` isn't available or doesn't expose `onFeatureFlags`/`getFeatureFlag`, the SDK logs a warning and falls back to `defaultVariant`.
-2. **Validate**: if the resolved variant has no registered handler, a warning is logged and `defaultVariant` is used instead.
+   - If `window.posthog` isn't available or doesn't expose `onFeatureFlags`/`getFeatureFlag`, the experiment falls back to `defaultVariant` and logs a warning when `debug` is enabled.
+2. **Validate**: if the resolved variant has no registered handler, `defaultVariant` is used instead and a warning is logged when `debug` is enabled.
 3. **Wait for `DOMContentLoaded`** (skipped if the DOM is already ready).
 4. **Apply** every update/handler registered for the active variant.
 
@@ -142,6 +144,22 @@ https://example.com/?01-checkout-message-feature-flag=test_group_1
 ```
 
 This bypasses PostHog entirely, so it works even for flags you're not enrolled in yet. It also works for flags that don't exist yet, so you can test your experiment before the flag is created in PostHog.
+
+## Debugging
+
+Debugging is disabled by default. Enable them for an individual experiment while developing or validating its configuration:
+
+```js
+createExperiment('01-checkout-message-feature-flag', {
+  debug: true,
+  variants: {
+    control: [],
+    test_group_1: [],
+  },
+}).run()
+```
+
+The debug flag only controls logs emitted by the experiment. Logs inside your own variant functions and element callbacks are unaffected.
 
 ## Commands
 

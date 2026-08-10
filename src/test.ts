@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from 'bun:test'
+import { afterEach, describe, expect, spyOn, test } from 'bun:test'
 import type { PostHog } from 'posthog-js'
 import { createExperiment } from '.'
 
@@ -198,6 +198,43 @@ describe('Experiment', () => {
 
     expect(variant).toBe('baseline')
     expect(baselineRuns).toBe(1)
+  })
+
+  test('keeps SDK diagnostics silent by default', async () => {
+    const document = new FakeDocument()
+    document.finishLoading()
+    installBrowser(document)
+    const warn = spyOn(console, 'warn').mockImplementation(() => {})
+
+    try {
+      await createExperiment('silent-test', {
+        variants: { control: [] },
+      }).run()
+
+      expect(warn).not.toHaveBeenCalled()
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  test('prints SDK diagnostics when debug is enabled', async () => {
+    const document = new FakeDocument()
+    document.finishLoading()
+    installBrowser(document)
+    const warn = spyOn(console, 'warn').mockImplementation(() => {})
+
+    try {
+      await createExperiment('debug-test', {
+        debug: true,
+        variants: { control: [] },
+      }).run()
+
+      expect(warn).toHaveBeenCalledWith(
+        "PostHog is unavailable. Applying 'control' by default.",
+      )
+    } finally {
+      warn.mockRestore()
+    }
   })
 
   test('applies every DOM update type and multiple handlers', async () => {
