@@ -2,8 +2,10 @@ import { createExperiment } from '../src'
 
 const experiment = createExperiment('example-all-configurations', {
   debug: true,
+  featureFlagTimeoutMs: 4_000,
   defaultVariant: 'baseline',
   variants: {
+    baseline: [],
     'copy-test': [
       {
         selector: '.experiment-title',
@@ -25,7 +27,7 @@ experiment
         style: {
           backgroundColor: '#111827',
           color: '#ffffff',
-          padding: 24,
+          padding: '24px',
         },
         callback: (element, activeVariant) => {
           element.dataset.experimentVariant = activeVariant

@@ -3,6 +3,7 @@ import { createExperiment } from '../src'
 // An empty control keeps the page unchanged; test reveals and hides product sections.
 createExperiment('001-product-below-addtocart-section', {
   variants: {
+    control: [],
     test: [
       {
         selector: '#Block-location_xtjinf',

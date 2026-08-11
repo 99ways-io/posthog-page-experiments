@@ -47,6 +47,7 @@ function createPostHog(value: boolean | string | undefined) {
   let unsubscribed = false
 
   const posthog = {
+    __loaded: true,
     getFeatureFlag: () => value,
     onFeatureFlags: (nextCallback: FeatureFlagsCallback) => {
       callback = nextCallback
@@ -190,6 +191,7 @@ describe('Experiment', () => {
 
     const variant = await createExperiment('constructor-test', {
       defaultVariant: 'baseline',
+      featureFlagTimeoutMs: 1,
       variants: {
         baseline: () => { baselineRuns += 1 },
         test: [],
@@ -205,15 +207,19 @@ describe('Experiment', () => {
     document.finishLoading()
     installBrowser(document)
     const warn = spyOn(console, 'warn').mockImplementation(() => {})
+    const log = spyOn(console, 'log').mockImplementation(() => {})
 
     try {
       await createExperiment('silent-test', {
+        featureFlagTimeoutMs: 1,
         variants: { control: [] },
       }).run()
 
       expect(warn).not.toHaveBeenCalled()
+      expect(log).not.toHaveBeenCalled()
     } finally {
       warn.mockRestore()
+      log.mockRestore()
     }
   })
 
@@ -222,18 +228,24 @@ describe('Experiment', () => {
     document.finishLoading()
     installBrowser(document)
     const warn = spyOn(console, 'warn').mockImplementation(() => {})
+    const log = spyOn(console, 'log').mockImplementation(() => {})
 
     try {
       await createExperiment('debug-test', {
         debug: true,
+        featureFlagTimeoutMs: 1,
         variants: { control: [] },
       }).run()
 
       expect(warn).toHaveBeenCalledWith(
-        "PostHog is unavailable. Applying 'control' by default.",
+        "[Experiment:debug-test] Feature flag 'debug-test' was not resolved within 1ms. Applying 'control'.",
+      )
+      expect(log).toHaveBeenCalledWith(
+        "[Experiment:debug-test] Activated variant 'control'.",
       )
     } finally {
       warn.mockRestore()
+      log.mockRestore()
     }
   })
 
@@ -300,6 +312,64 @@ describe('Experiment', () => {
     expect(controlRuns).toBe(1)
   })
 
+  test('waits for PostHog to become available before the timeout', async () => {
+    const document = new FakeDocument()
+    document.finishLoading()
+    installBrowser(document)
+    const featureFlags = createPostHog('test')
+
+    const run = createExperiment('late-posthog-test', {
+      featureFlagTimeoutMs: 250,
+      variants: { control: [], test: [] },
+    }).run()
+
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    window.posthog = featureFlags.posthog
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    featureFlags.emit()
+
+    expect(await run).toBe('test')
+    expect(featureFlags.wasUnsubscribed()).toBe(true)
+  })
+
+  test('starts and caches readiness during construction', async () => {
+    const document = new FakeDocument()
+    document.finishLoading()
+    installBrowser(document)
+    const featureFlags = createPostHog('test')
+    const experiment = createExperiment('eager-readiness-test', {
+      featureFlagTimeoutMs: 250,
+      variants: { control: [], test: [] },
+    })
+
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    window.posthog = featureFlags.posthog
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    featureFlags.emit()
+
+    expect(await experiment.run()).toBe('test')
+  })
+
+  test('falls back and unsubscribes when PostHog never resolves the flag', async () => {
+    const document = new FakeDocument()
+    document.finishLoading()
+    const featureFlags = createPostHog('test')
+    installBrowser(document, '', featureFlags.posthog)
+    let controlRuns = 0
+
+    const variant = await createExperiment('posthog-timeout-test', {
+      featureFlagTimeoutMs: 5,
+      variants: {
+        control: () => { controlRuns += 1 },
+        test: [],
+      },
+    }).run()
+
+    expect(variant).toBe('control')
+    expect(controlRuns).toBe(1)
+    expect(featureFlags.wasUnsubscribed()).toBe(true)
+  })
+
   test('rejects registrations after run starts', async () => {
     const document = new FakeDocument()
     document.finishLoading()
@@ -308,10 +378,38 @@ describe('Experiment', () => {
       variants: { control: [] },
     })
 
-    const run = await experiment.run()
+    const run = experiment.run()
     expect(() => experiment.on('test', [])).toThrow(
       "Cannot register variant 'test' after the experiment has started.",
     )
     expect(await run).toBe('control')
+  })
+
+  test('run is idempotent', async () => {
+    const document = new FakeDocument()
+    document.finishLoading()
+    installBrowser(document, '?idempotent-test=test')
+    let runs = 0
+    const experiment = createExperiment('idempotent-test', {
+      variants: {
+        control: [],
+        test: () => { runs += 1 },
+      },
+    })
+
+    const firstRun = experiment.run()
+    const secondRun = experiment.run()
+
+    expect(firstRun).toBe(secondRun)
+    expect(await firstRun).toBe('test')
+    expect(runs).toBe(1)
+  })
+
+  test('rejects invalid feature-flag timeout values', () => {
+    expect(() => createExperiment('invalid-timeout-test', {
+      featureFlagTimeoutMs: -1,
+    })).toThrow(
+      'featureFlagTimeoutMs must be a finite number greater than or equal to 0.',
+    )
   })
 })
