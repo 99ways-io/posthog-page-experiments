@@ -3,7 +3,7 @@ import type { PostHog } from 'posthog-js'
 declare global {
   interface Window {
     posthog?: PostHog
-    createExperiment: (...args: ConstructorParameters<typeof Experiment>) => Experiment
+    runExperiment: (...args: ConstructorParameters<typeof Experiment>) => Promise<String>
   }
 }
 
@@ -11,25 +11,26 @@ type CSSRules = Partial<Record<keyof CSSStyleDeclaration, string | number>>
 const DEFAULT_FEATURE_FLAG_TIMEOUT_MS = 4_000
 const POSTHOG_POLL_INTERVAL_MS = 50
 
-export type VariationUpdate = {
-  selector: string
-  updates: {
-    style?: CSSRules
-    callback?: (element: HTMLElement, variant: string) => unknown
-    innerText?: string
-    innerHTML?: string
-  }
+export type PureUpdate = {
+  style?: CSSRules
+  callback?: (element: HTMLElement, variant: string) => unknown
+  innerText?: string
+  innerHTML?: string
 }
-export type Config = VariationUpdate[]
-export type VariantHandler = Config | (() => unknown)
+export type PureConfig = {
+  selector: string
+  updates: PureUpdate
+}
+export type VariationUpdate = PureConfig | (() => unknown)
+export type Config = VariationUpdate[] | (() => unknown)
+export type VariantHandler = Config
+
 export type ExperimentOptions = {
   defaultVariant?: string
   variants?: Record<string, VariantHandler>
   debug?: boolean
   featureFlagTimeoutMs?: number
 }
-
-
 
 export class Experiment {
   private readonly variants = new Map<string, Set<VariantHandler>>()
@@ -273,18 +274,23 @@ export class Experiment {
     this.log(`Finished applying variant '${this.activeVariant}'.`)
   }
 
-  private applyHandler(handler: VariantHandler): void {
-    if (typeof handler === 'function') {
-      handler()
+  private applyHandler(handlers: VariantHandler): void {
+    if (typeof handlers === 'function') {
+      handlers()
       return
     }
 
-    handler.forEach(({ selector, updates }) => {
+    handlers.forEach((handler) => {
+      if (typeof handler === 'function') {
+        handler()
+        return
+      }
+      const { selector, updates } = handler;
       this.applyUpdates(selector, updates)
     })
   }
 
-  private applyUpdates(selector: string, updates: VariationUpdate['updates']): void {
+  private applyUpdates(selector: string, updates: PureUpdate): void {
     const elements = document.querySelectorAll<HTMLElement>(selector)
     if (!elements.length) {
       this.warn('No elements found for selector:', selector)
@@ -316,8 +322,8 @@ export class Experiment {
     if (this.debug) console.warn(`[Experiment:${this.featureFlag}] ${message}`, ...details)
   }
 }
-export function createExperiment(...args: ConstructorParameters<typeof Experiment>): Experiment {
-  return new Experiment(...args);
+export function runExperiment(...args: ConstructorParameters<typeof Experiment>): Promise<string> {
+  return new Experiment(...args).run();
 }
 
-if (typeof window !== 'undefined') window.createExperiment = createExperiment
+if (typeof window !== 'undefined') window.runExperiment = runExperiment

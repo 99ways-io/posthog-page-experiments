@@ -1,4 +1,4 @@
-import { createExperiment } from '../src'
+import { runExperiment } from '../src'
 
 // Migrated from scripts-inventory/script5.js.
 // Demonstrates an element callback and two independent experiments on one page.
@@ -38,7 +38,7 @@ function insertNameAfterOpeningQuote(element: HTMLElement, name: string): void {
 
 const firstName = getStoredFirstName()
 
-const experiment01 = createExperiment('044-fcts-sep-tripwire-headline', {
+runExperiment('044-fcts-sep-tripwire-headline', {
   variants: {
     test: [
       {
@@ -52,9 +52,8 @@ const experiment01 = createExperiment('044-fcts-sep-tripwire-headline', {
     ],
   },
 })
-experiment01.run()
 
-const experiment02 = createExperiment('045-fcts-sep-tripwire-countdown', {
+runExperiment('045-fcts-sep-tripwire-countdown', {
   variants: {
     test: [
       {
@@ -68,4 +67,3 @@ const experiment02 = createExperiment('045-fcts-sep-tripwire-countdown', {
     ],
   },
 });
-experiment02.run()

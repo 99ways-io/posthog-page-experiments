@@ -1,7 +1,7 @@
-import { createExperiment } from '../src'
+import { runExperiment } from '../src'
 
 // An empty control keeps the page unchanged; test reveals and hides product sections.
-createExperiment('001-product-below-addtocart-section', {
+runExperiment('001-product-below-addtocart-section', {
   variants: {
     control: [],
     test: [
@@ -27,4 +27,4 @@ createExperiment('001-product-below-addtocart-section', {
       },
     ],
   },
-}).run()
+})

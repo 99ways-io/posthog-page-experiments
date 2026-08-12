@@ -1,6 +1,6 @@
-import { createExperiment } from '../src'
+import { runExperiment } from '../src'
 
-const experiment = createExperiment('example-all-configurations', {
+const experiment = runExperiment('example-all-configurations', {
   debug: true,
   featureFlagTimeoutMs: 4_000,
   defaultVariant: 'baseline',
@@ -9,37 +9,35 @@ const experiment = createExperiment('example-all-configurations', {
     'copy-test': [
       {
         selector: '.experiment-title',
-        updates: { innerText: 'A plain-text headline' },
+        updates: {
+          innerText: 'A plain-text headline'
+        },
       },
       {
         selector: '.experiment-description',
         updates: { innerHTML: 'Save <strong>40%</strong> today' },
       },
     ],
-  },
-})
-
-experiment
-  .on('design-test', [
-    {
-      selector: '.experiment-card',
-      updates: {
-        style: {
-          backgroundColor: '#111827',
-          color: '#ffffff',
-          padding: '24px',
-        },
-        callback: (element, activeVariant) => {
-          element.dataset.experimentVariant = activeVariant
+    'design-test': [
+      {
+        selector: '.experiment-card',
+        updates: {
+          style: {
+            backgroundColor: '#111827',
+            color: '#ffffff',
+            padding: '24px',
+          },
+          callback: (element, activeVariant) => {
+            element.dataset.experimentVariant = activeVariant
+          },
         },
       },
-    },
-  ])
-  // Multiple handlers may be registered for the same variant.
-  .on('design-test', () => {
-    document.documentElement.dataset.hasExperiment = 'true'
-  })
-
-experiment.run().then((activeVariant) => {
+      () => {
+        document.documentElement.dataset.hasExperiment = 'true'
+      }
+    ]
+  },
+}).then((activeVariant) => {
   console.info(`Applied example-all-configurations: ${activeVariant}`)
 })
+

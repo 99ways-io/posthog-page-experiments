@@ -1,4 +1,4 @@
-import { createExperiment } from '../src'
+import { runExperiment } from '../src'
 
 function injectSaleStyles() {
   if (document.querySelector('#experiment-010-cart-features')) return
@@ -29,8 +29,12 @@ function updateSaleTags() {
     })
 }
 
-createExperiment('010-cart-features')
-  .on('control', injectSaleStyles)
-  .on('control', updateSaleTags)
-  .on('test', [])
-  .run()
+runExperiment('010-cart-features', {
+  variants: {
+    control: [
+      injectSaleStyles,
+      updateSaleTags
+    ],
+    test: []
+  }
+})

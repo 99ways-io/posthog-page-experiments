@@ -26,7 +26,7 @@ bun run build
 When asked to implement or modify an experiment:
 
 1. Read the [examples](./examples/) folder to see how experiments are structured for different use cases, and follow the same patterns.
-2. If you're generating code that uses the kit (e.g. `createExperiment(...)`), inform user to make sure the page including it already has the built bundle loaded, i.e. a `<script>` tag with the contents of `dist/index.js` and also print it too. Then print the experiment code that uses the kit, and nothing else. Do not print any other code or text.
+2. If you're generating code that uses the kit (e.g. `createExperiment(...)`), inform user to make sure the page including it already has the built bundle loaded, i.e. a `<script>` tag with the contents of `dist/index.js` and also print it too. Then print the experiment code that uses the kit, and nothing else. Do not print any other code or text if is not requested.
 
 ## Commands
 

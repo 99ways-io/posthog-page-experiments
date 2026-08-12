@@ -95,10 +95,12 @@ describe('Experiment', () => {
     const featureFlags = createPostHog('test')
     installBrowser(document, '', featureFlags.posthog)
 
-    const run = createExperiment('banner-test')
-      .on('control', [])
-      .on('test', [{ selector: '.banner', updates: { style: { display: 'block' } } }])
-      .run()
+    const run = createExperiment('banner-test', {
+      variants: {
+        control: [],
+        test: [{ selector: '.banner', updates: { style: { display: 'block' } } }]
+      }
+    })
 
     featureFlags.emit()
     await Promise.resolve()
@@ -117,10 +119,7 @@ describe('Experiment', () => {
       const featureFlags = createPostHog(flagValue)
       installBrowser(document, '', featureFlags.posthog)
 
-      const run = createExperiment('boolean-test')
-        .on('control', [])
-        .on('test', [])
-        .run()
+      const run = createExperiment('boolean-test', { variants: { control: [], test: [] } })
 
       featureFlags.emit()
       expect(await run).toBe(expectedVariant)
@@ -134,10 +133,12 @@ describe('Experiment', () => {
     installBrowser(document, '', featureFlags.posthog)
     let controlRuns = 0
 
-    const run = createExperiment('unknown-test')
-      .on('control', () => { controlRuns += 1 })
-      .on('test', [])
-      .run()
+    const run = createExperiment('unknown-test', {
+      variants: {
+        control: [() => { controlRuns += 1 }],
+        test: []
+      }
+    })
 
     featureFlags.emit()
     expect(await run).toBe('control')
@@ -150,10 +151,14 @@ describe('Experiment', () => {
     installBrowser(document, '?url-test=test')
     let testRuns = 0
 
-    const variant = await createExperiment('url-test')
-      .on('control', [])
-      .on('test', () => { testRuns += 1 })
-      .run()
+    const variant = await createExperiment('url-test', {
+      variants: {
+        control: [],
+        test: [
+          () => { testRuns += 1 }
+        ]
+      }
+    })
 
     expect(variant).toBe('test')
     expect(testRuns).toBe(1)
@@ -167,18 +172,22 @@ describe('Experiment', () => {
     installBrowser(document, '?callback-test=test')
     let callbackVariant: string | undefined
 
-    await createExperiment('callback-test')
-      .on('control', [])
-      .on('test', [{
-        selector: '.headline',
-        updates: {
-          callback: (callbackElement, variant) => {
-            expect(callbackElement).toBe(element)
-            callbackVariant = variant
-          },
-        },
-      }])
-      .run()
+    await createExperiment('callback-test', {
+      variants: {
+        control: [],
+        test: [
+          {
+            selector: '.headline',
+            updates: {
+              callback: (callbackElement, variant) => {
+                expect(callbackElement).toBe(element)
+                callbackVariant = variant
+              },
+            },
+          }
+        ]
+      }
+    })
 
     expect(callbackVariant).toBe('test')
   })
@@ -196,7 +205,7 @@ describe('Experiment', () => {
         baseline: () => { baselineRuns += 1 },
         test: [],
       },
-    }).run()
+    })
 
     expect(variant).toBe('baseline')
     expect(baselineRuns).toBe(1)
@@ -206,14 +215,14 @@ describe('Experiment', () => {
     const document = new FakeDocument()
     document.finishLoading()
     installBrowser(document)
-    const warn = spyOn(console, 'warn').mockImplementation(() => {})
-    const log = spyOn(console, 'log').mockImplementation(() => {})
+    const warn = spyOn(console, 'warn').mockImplementation(() => { })
+    const log = spyOn(console, 'log').mockImplementation(() => { })
 
     try {
       await createExperiment('silent-test', {
         featureFlagTimeoutMs: 1,
         variants: { control: [] },
-      }).run()
+      })
 
       expect(warn).not.toHaveBeenCalled()
       expect(log).not.toHaveBeenCalled()
@@ -227,15 +236,15 @@ describe('Experiment', () => {
     const document = new FakeDocument()
     document.finishLoading()
     installBrowser(document)
-    const warn = spyOn(console, 'warn').mockImplementation(() => {})
-    const log = spyOn(console, 'log').mockImplementation(() => {})
+    const warn = spyOn(console, 'warn').mockImplementation(() => { })
+    const log = spyOn(console, 'log').mockImplementation(() => { })
 
     try {
       await createExperiment('debug-test', {
         debug: true,
         featureFlagTimeoutMs: 1,
         variants: { control: [] },
-      }).run()
+      })
 
       expect(warn).toHaveBeenCalledWith(
         "[Experiment:debug-test] Feature flag 'debug-test' was not resolved within 1ms. Applying 'control'.",
@@ -281,11 +290,10 @@ describe('Experiment', () => {
               callback: (_element, variant) => { callbackVariant = variant },
             },
           },
+          () => { functionRuns += 1 }
         ],
       },
     })
-      .on('test', () => { functionRuns += 1 })
-      .run()
 
     expect(title.element.innerText).toBe('Updated title')
     expect(description.element.innerHTML).toBe('Save <strong>40%</strong>')
@@ -306,7 +314,7 @@ describe('Experiment', () => {
         control: () => { controlRuns += 1 },
         test: [],
       },
-    }).run()
+    })
 
     expect(variant).toBe('control')
     expect(controlRuns).toBe(1)
@@ -321,7 +329,7 @@ describe('Experiment', () => {
     const run = createExperiment('late-posthog-test', {
       featureFlagTimeoutMs: 250,
       variants: { control: [], test: [] },
-    }).run()
+    })
 
     await new Promise((resolve) => setTimeout(resolve, 10))
     window.posthog = featureFlags.posthog
@@ -347,7 +355,7 @@ describe('Experiment', () => {
     await new Promise((resolve) => setTimeout(resolve, 60))
     featureFlags.emit()
 
-    expect(await experiment.run()).toBe('test')
+    expect(await experiment).toBe('test')
   })
 
   test('falls back and unsubscribes when PostHog never resolves the flag', async () => {
@@ -363,46 +371,11 @@ describe('Experiment', () => {
         control: () => { controlRuns += 1 },
         test: [],
       },
-    }).run()
+    })
 
     expect(variant).toBe('control')
     expect(controlRuns).toBe(1)
     expect(featureFlags.wasUnsubscribed()).toBe(true)
-  })
-
-  test('rejects registrations after run starts', async () => {
-    const document = new FakeDocument()
-    document.finishLoading()
-    installBrowser(document, '?registration-test=control')
-    const experiment = createExperiment('registration-test', {
-      variants: { control: [] },
-    })
-
-    const run = experiment.run()
-    expect(() => experiment.on('test', [])).toThrow(
-      "Cannot register variant 'test' after the experiment has started.",
-    )
-    expect(await run).toBe('control')
-  })
-
-  test('run is idempotent', async () => {
-    const document = new FakeDocument()
-    document.finishLoading()
-    installBrowser(document, '?idempotent-test=test')
-    let runs = 0
-    const experiment = createExperiment('idempotent-test', {
-      variants: {
-        control: [],
-        test: () => { runs += 1 },
-      },
-    })
-
-    const firstRun = experiment.run()
-    const secondRun = experiment.run()
-
-    expect(firstRun).toBe(secondRun)
-    expect(await firstRun).toBe('test')
-    expect(runs).toBe(1)
   })
 
   test('rejects invalid feature-flag timeout values', () => {
