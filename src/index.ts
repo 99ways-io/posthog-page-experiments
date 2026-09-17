@@ -1,113 +1,112 @@
-import type { PostHog } from 'posthog-js'
+export type Awaitable<T> = T | PromiseLike<T>
 
-declare global {
-  interface Window {
-    posthog?: PostHog
-    runExperiment: (...args: ConstructorParameters<typeof Experiment>) => Promise<String>
-  }
+export interface PostHogClient {
+  __loaded?: boolean
+  getFeatureFlag(featureFlag: string): boolean | string | null | undefined
+  onFeatureFlags(callback: () => void): (() => void) | void
 }
 
-type CSSRules = Partial<Record<keyof CSSStyleDeclaration, string | number>>
-const DEFAULT_FEATURE_FLAG_TIMEOUT_MS = 4_000
-const POSTHOG_POLL_INTERVAL_MS = 50
+export type StyleUpdates = Record<string, string | number | null | undefined>
 
-export type PureUpdate = {
-  style?: CSSRules
+export interface ElementUpdates {
+  style?: StyleUpdates
   callback?: (element: HTMLElement, variant: string) => unknown
   innerText?: string
   innerHTML?: string
 }
-export type PureConfig = {
-  selector: string
-  updates: PureUpdate
-}
-export type VariationUpdate = PureConfig | (() => unknown)
-export type Config = VariationUpdate[] | (() => unknown)
-export type VariantHandler = Config
 
-export type ExperimentOptions = {
+export interface ElementChange {
+  selector: string
+  updates: ElementUpdates
+}
+
+export type VariantStep = ElementChange | (() => unknown)
+export type VariantHandler = VariantStep[] | (() => unknown)
+
+export interface ExperimentOptions {
+  variants: Record<string, VariantHandler>
   defaultVariant?: string
-  variants?: Record<string, VariantHandler>
+  isEligible?: () => Awaitable<boolean>
+  posthog?: PostHogClient
   debug?: boolean
   featureFlagTimeoutMs?: number
 }
 
-export class Experiment {
-  private readonly variants = new Map<string, Set<VariantHandler>>()
-  private activeVariant: string | null = null
-  private readonly readyPromise: Promise<string>
-  private runPromise: Promise<string> | null = null
-  private defaultVariant: string = 'control';
+export type ExperimentResult = string | null
+
+const DEFAULT_FEATURE_FLAG_TIMEOUT_MS = 4_000
+const POSTHOG_POLL_INTERVAL_MS = 50
+
+class Experiment {
+  private readonly variants: Map<string, VariantHandler>
+  private readonly defaultVariant: string
+  private readonly isEligible: () => Awaitable<boolean>
+  private readonly explicitPostHog?: PostHogClient
   private readonly debug: boolean
   private readonly featureFlagTimeoutMs: number
+  private runPromise: Promise<ExperimentResult> | null = null
 
   constructor(
     private readonly featureFlag: string,
-    initialConfig: ExperimentOptions = {},
+    options: ExperimentOptions,
   ) {
-    this.debug = initialConfig.debug ?? false
-    this.featureFlagTimeoutMs = initialConfig.featureFlagTimeoutMs ?? DEFAULT_FEATURE_FLAG_TIMEOUT_MS
+    if (!featureFlag.trim()) {
+      throw new TypeError('featureFlag must be a non-empty string.')
+    }
+
+    this.defaultVariant = options.defaultVariant ?? 'control'
+    this.variants = new Map(Object.entries(options.variants))
+    this.isEligible = options.isEligible ?? (() => true)
+    this.explicitPostHog = options.posthog
+    this.debug = options.debug ?? false
+    this.featureFlagTimeoutMs = options.featureFlagTimeoutMs ?? DEFAULT_FEATURE_FLAG_TIMEOUT_MS
+
     if (!Number.isFinite(this.featureFlagTimeoutMs) || this.featureFlagTimeoutMs < 0) {
       throw new RangeError('featureFlagTimeoutMs must be a finite number greater than or equal to 0.')
     }
 
-    if (initialConfig.defaultVariant)
-      this.defaultVariant = initialConfig.defaultVariant;
-    if (initialConfig.variants) {
-      Object.entries(initialConfig.variants).forEach(([variant, handler]) => {
-        this.on(variant, handler);
-      })
+    if (!this.defaultVariant.trim()) {
+      throw new TypeError('defaultVariant must be a non-empty string.')
     }
 
-    this.log(`Starting readiness with a ${this.featureFlagTimeoutMs}ms feature-flag timeout.`)
-    this.readyPromise = Promise.all([
-      this.resolveVariant(),
-      this.waitForDOMContentLoaded(),
-    ]).then(([variant]) => {
-      this.log(`Readiness completed with candidate variant '${variant}'.`)
-      return variant
-    })
+    if (!this.variants.has(this.defaultVariant)) {
+      throw new TypeError(`variants must include the default variant '${this.defaultVariant}'.`)
+    }
   }
 
-  on(variant: string, handler: VariantHandler): this {
-    if (this.runPromise) {
-      throw new Error(`Cannot register variant '${variant}' after the experiment has started.`)
-    }
-
-    let handlers = this.variants.get(variant)
-    if (!handlers) {
-      handlers = new Set<VariantHandler>()
-      this.variants.set(variant, handlers)
-    }
-    handlers.add(handler)
-    this.log(`Registered a handler for variant '${variant}'.`)
-
-    return this
-  }
-
-  run(): Promise<string> {
-    if (!this.runPromise) {
-      this.log('Run requested; waiting for cached readiness.')
-      this.runPromise = this.readyPromise.then((variant) => {
-        this.activeVariant = this.getConfiguredVariantOrDefault(variant)
-        this.log(`Activated variant '${this.activeVariant}'.`)
-        this.applyActiveVariant()
-        return this.activeVariant
-      })
-    }
-
+  run(): Promise<ExperimentResult> {
+    if (!this.runPromise) this.runPromise = this.runOnce()
     return this.runPromise
   }
 
+  private async runOnce(): Promise<ExperimentResult> {
+    if (typeof window === 'undefined' || typeof document === 'undefined') {
+      this.log('Browser globals are unavailable; skipping the experiment.')
+      return null
+    }
+
+    await this.waitForDOMContentLoaded()
+
+    this.log('Checking eligibility before evaluating the feature flag.')
+    if (!(await this.isEligible())) {
+      this.log('Visitor is ineligible; skipping feature-flag evaluation and variant application.')
+      return null
+    }
+
+    const resolvedVariant = await this.resolveVariant()
+    const activeVariant = this.getConfiguredVariantOrDefault(resolvedVariant)
+    this.log(`Activated variant '${activeVariant}'.`)
+    this.applyVariant(activeVariant)
+    return activeVariant
+  }
+
   private getVariantFromQueryParam(): string | null {
-    if (typeof window === 'undefined') return null
     return new URLSearchParams(window.location.search).get(this.featureFlag)
   }
 
-  private getPostHog(): PostHog | undefined {
-    if (typeof window === 'undefined') return undefined
+  private getPostHog(): PostHogClient | undefined {
+    const posthog = this.explicitPostHog ?? window.posthog
 
-    const posthog = window.posthog
     if (
       posthog
       && posthog.__loaded === true
@@ -125,13 +124,6 @@ export class Experiment {
     if (queryVariant) {
       this.log(`Using query-string override variant '${queryVariant}'.`)
       return Promise.resolve(queryVariant)
-    }
-
-    if (typeof window === 'undefined') {
-      this.warn(
-        `Window is unavailable. Applying '${this.defaultVariant}' by default.`,
-      )
-      return Promise.resolve(this.defaultVariant)
     }
 
     this.log('Waiting for initialized PostHog and its first feature-flag notification.')
@@ -158,7 +150,6 @@ export class Experiment {
       const cleanup = () => {
         if (pollTimer !== undefined) clearInterval(pollTimer)
         if (timeoutTimer !== undefined) clearTimeout(timeoutTimer)
-
         if (!removePostHogSubscription()) unsubscribeWhenAvailable = true
       }
 
@@ -182,16 +173,13 @@ export class Experiment {
 
         try {
           this.log('PostHog is initialized; subscribing to feature flags.')
-          unsubscribe = posthog.onFeatureFlags(() => {
+          const remove = posthog.onFeatureFlags(() => {
             try {
-              // PostHog can replace the object used during subscription while
-              // the queued callback remains attached to the original reference.
-              // Always evaluate through the current initialized SDK so the
-              // rendered variant matches PostHog's recorded assignment.
               const currentPostHog = this.getPostHog()
               if (!currentPostHog) {
                 throw new Error('The initialized PostHog instance is no longer available.')
               }
+
               const flagValue = currentPostHog.getFeatureFlag(this.featureFlag)
               const variant = this.mapFeatureFlagValue(flagValue)
               this.log(`PostHog resolved variant '${variant}' from raw value ${JSON.stringify(flagValue)}.`)
@@ -205,7 +193,7 @@ export class Experiment {
             }
           })
 
-          // PostHog may invoke the callback synchronously before returning cleanup.
+          if (typeof remove === 'function') unsubscribe = remove
           if (unsubscribeWhenAvailable) {
             unsubscribeWhenAvailable = false
             removePostHogSubscription()
@@ -234,9 +222,9 @@ export class Experiment {
     })
   }
 
-  private mapFeatureFlagValue(value: boolean | string | undefined): string {
+  private mapFeatureFlagValue(value: boolean | string | null | undefined): string {
     if (value === true) return 'test'
-    if (value === false || value === undefined || value === '') {
+    if (value === false || value === null || value === undefined || value === '') {
       return this.defaultVariant
     }
     return value
@@ -252,7 +240,7 @@ export class Experiment {
   }
 
   private waitForDOMContentLoaded(): Promise<void> {
-    if (typeof document === 'undefined' || document.readyState !== 'loading') {
+    if (document.readyState !== 'loading') {
       this.log('DOM is already ready; skipping the DOMContentLoaded wait.')
       return Promise.resolve()
     }
@@ -266,42 +254,34 @@ export class Experiment {
     })
   }
 
-  private applyActiveVariant(): void {
-    if (!this.activeVariant) return
+  private applyVariant(variant: string): void {
+    const handler = this.variants.get(variant)
+    if (!handler) return
 
-    const handlers = this.variants.get(this.activeVariant)
-    if (!handlers) {
-      this.warn(
-        `Default variant '${this.activeVariant}' is not configured for '${this.featureFlag}'.`,
-      )
-      return
-    }
-
-    this.log(`Applying ${handlers.size} handler(s) for variant '${this.activeVariant}'.`)
-    handlers.forEach((handler) => this.applyHandler(handler))
-    this.log(`Finished applying variant '${this.activeVariant}'.`)
+    this.log(`Applying variant '${variant}'.`)
+    this.applyHandler(handler, variant)
+    this.log(`Finished applying variant '${variant}'.`)
   }
 
-  private applyHandler(handlers: VariantHandler): void {
-    if (typeof handlers === 'function') {
-      handlers()
+  private applyHandler(handler: VariantHandler, variant: string): void {
+    if (typeof handler === 'function') {
+      handler()
       return
     }
 
-    handlers.forEach((handler) => {
-      if (typeof handler === 'function') {
-        handler()
+    handler.forEach((step) => {
+      if (typeof step === 'function') {
+        step()
         return
       }
-      const { selector, updates } = handler;
-      this.applyUpdates(selector, updates)
+      this.applyUpdates(step.selector, step.updates, variant)
     })
   }
 
-  private applyUpdates(selector: string, updates: PureUpdate): void {
+  private applyUpdates(selector: string, updates: ElementUpdates, variant: string): void {
     const elements = document.querySelectorAll<HTMLElement>(selector)
     if (!elements.length) {
-      this.warn('No elements found for selector:', selector)
+      this.warn(`No elements found for selector '${selector}'.`)
       return
     }
 
@@ -309,6 +289,7 @@ export class Experiment {
     elements.forEach((element) => {
       if (updates.style) {
         Object.entries(updates.style).forEach(([property, value]) => {
+          if (value === null || value === undefined) return
           const cssProperty = property.startsWith('--')
             ? property
             : property.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)
@@ -318,7 +299,7 @@ export class Experiment {
 
       if (updates.innerText !== undefined) element.innerText = updates.innerText
       if (updates.innerHTML !== undefined) element.innerHTML = updates.innerHTML
-      if (updates.callback) updates.callback(element, this.activeVariant!)
+      updates.callback?.(element, variant)
     })
   }
 
@@ -330,8 +311,17 @@ export class Experiment {
     if (this.debug) console.warn(`[Experiment:${this.featureFlag}] ${message}`, ...details)
   }
 }
-export function runExperiment(...args: ConstructorParameters<typeof Experiment>): Promise<string> {
-  return new Experiment(...args).run();
+
+export function runExperiment(
+  featureFlag: string,
+  options: ExperimentOptions,
+): Promise<ExperimentResult> {
+  return new Experiment(featureFlag, options).run()
 }
 
-if (typeof window !== 'undefined') window.runExperiment = runExperiment
+declare global {
+  interface Window {
+    posthog?: PostHogClient
+    runExperiment: typeof runExperiment
+  }
+}

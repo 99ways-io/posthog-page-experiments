@@ -1,0 +1,36 @@
+name: Release package
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the validated package to npm
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    environment: npm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun run test:unit
+      - run: bun run build
+      - run: bun run check:package
+      - name: Publish to npm
+        if: ${{ inputs.publish }}
+        run: npm publish --access public --provenance

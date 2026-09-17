@@ -1,18 +1,71 @@
 {
-  "name": "ab-sdk",
-  "private": true,
+  "name": "@99ways/posthog-page-experiments",
+  "version": "0.1.0",
+  "description": "Code-first page experiments for PostHog with eligibility checks, URL QA overrides, and safe fallbacks.",
+  "type": "module",
+  "license": "MIT",
+  "author": "99Ways",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/99ways-io/posthog-page-experiments.git"
+  },
+  "bugs": {
+    "url": "https://github.com/99ways-io/posthog-page-experiments/issues"
+  },
+  "homepage": "https://github.com/99ways-io/posthog-page-experiments#readme",
+  "keywords": [
+    "posthog",
+    "ab-testing",
+    "experimentation",
+    "feature-flags",
+    "cro",
+    "growth-engineering",
+    "javascript",
+    "typescript"
+  ],
+  "files": [
+    "dist",
+    "CHANGELOG.md",
+    "LICENSE",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./browser": "./dist/posthog-page-experiments.min.js"
+  },
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "unpkg": "./dist/posthog-page-experiments.min.js",
+  "jsdelivr": "./dist/posthog-page-experiments.min.js",
+  "sideEffects": false,
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "packageManager": "bun@1.4.2",
   "scripts": {
-    "build": "bun build ./src/index.ts --outfile ./dist/index.js --format iife --minify",
-    "test": "bun test ./src/test.ts",
-    "typecheck": "tsc --noEmit"
+    "clean": "bun -e \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true })\"",
+    "build": "bun run clean && bun run build:module && bun run build:browser && bun run build:types",
+    "build:module": "bun build ./src/index.ts --outfile ./dist/index.js --format esm --target browser --minify",
+    "build:browser": "bun build ./src/browser.ts --outfile ./dist/posthog-page-experiments.min.js --format iife --target browser --minify",
+    "build:types": "tsc -p tsconfig.build.json",
+    "build:test-fixture": "bun build ./tests/fixtures/posthog.ts --outfile ./tests/fixtures/posthog.bundle.js --format iife --target browser",
+    "typecheck": "tsc --noEmit",
+    "test": "bun run test:unit && bun run test:browser",
+    "test:unit": "bun test ./src/index.test.ts",
+    "test:browser": "bun run build && bun run build:test-fixture && playwright test",
+    "check:package": "npm pack --dry-run && publint",
+    "demo": "bun run build && bun ./scripts/serve-demo.ts"
   },
   "devDependencies": {
-    "@types/bun": "latest"
-  },
-  "peerDependencies": {
-    "typescript": "^6"
-  },
-  "dependencies": {
-    "posthog-js": "^1.414.0"
+    "@playwright/test": "^1.63.0",
+    "@types/bun": "^1.4.2",
+    "posthog-js": "^1.433.9",
+    "publint": "^0.3.24",
+    "typescript": "^7.0.2"
   }
 }

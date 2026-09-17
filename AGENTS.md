@@ -1,45 +1,31 @@
-# AGENTS.md
+# Agent guidance
 
-Guidance for AI coding agents working in this repository.
+Read `README.md` before changing code. It is the source of truth for the product's public purpose, API, and boundaries.
 
-## Get oriented first
+## Scope
 
-Read [README.md](./README.md) before doing anything else, to get a full picture of the project — what it does, its current features, and its documented boundaries. Don't restate or re-derive that information here; treat the README as the source of truth and re-read it if it changes.
+This is a small browser execution layer for code-first PostHog page experiments. Keep PostHog responsible for assignment and analysis. Do not expand the project into a visual editor, analytics SDK, or framework suite without explicit direction and evidence of demand.
 
-## Build project
-
-You only need to build the project when the ./dist directory does not exist or when the TypeScript source actually changes. The build process is handled by [bun](https://bun.sh/), which is a fast JavaScript runtime and package manager. If `bun` is not installed, fetch https://bun.com/llms.txt to find the right install method for the current system, and install it automatically before running any commands.
-
-Then install dependencies:
-
-```bash
-bun install
-```
-
-build the kit bundle:
-
-```bash
-bun run build
-```
-## Generating code for an experiment
-
-When asked to implement or modify an experiment:
-
-1. Read the [examples](./examples/) folder to see how experiments are structured for different use cases, and follow the same patterns.
-2. If you're generating code that uses the kit (e.g. `createExperiment(...)`), inform user to make sure the page including it already has the built bundle loaded, i.e. a `<script>` tag with the contents of `dist/index.js` and also print it too. Then print the experiment code that uses the kit, and nothing else. Do not print any other code or text if is not requested.
+`runExperiment()` is the public runtime API. The internal implementation class is not a public semver contract.
 
 ## Commands
 
 ```bash
 bun install
-bun run build   # writes browser bundle to dist/index.js
-bun run test
+bun run typecheck
+bun run test:unit
+bun run test:browser
+bun run build
+bun run check:package
 ```
 
-Only rebuild `dist/index.js` when the TypeScript source actually changes.
+When `src/` changes, run typecheck, unit tests, browser tests, and build. When packaging or exports change, also inspect `npm pack --dry-run` output and run `publint`.
 
-## Before finishing a task
+## Correctness rules
 
-1. `bun run build` if `src/` changed, and confirm `dist/index.js` still exposes `window.createExperiment`.
-2. `bun run test` — all tests passing.
-3. Check the README examples still match the current API.
+- Eligibility must finish before PostHog evaluates the feature flag.
+- Ineligible visitors must not be assigned an active variant by this package.
+- Preserve safe, explicit fallback behavior.
+- Keep the module entry side-effect-free; only `src/browser.ts` creates `window.runExperiment`.
+- Examples must be neutral and must not contain client domains, selectors, identifiers, copy, or storage keys.
+- Do not publish to npm, create a public release, or change repository visibility without the owner's explicit instruction.

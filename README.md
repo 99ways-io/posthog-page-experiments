@@ -1,58 +1,82 @@
-# A/B Experiment Kit
+# PostHog Page Experiments
 
-A small browser kit for running PostHog-backed A/B and multivariate experiments. Pass every variant to `runExperiment()`, and the kit resolves the visitor's group, waits for the DOM, applies that variant, and returns the activated variant name.
+Code-first page experiments for PostHog. Apply A/B and multivariate variants to existing websites with eligibility checks, URL QA overrides, and safe fallbacks.
 
-## What it can do today
+Use it when PostHog should handle assignment and analysis, but the tested experience lives in an existing page that you need to change with JavaScript or targeted DOM updates.
 
-Listed from the kit's primary purpose down to supporting conveniences:
+> [!NOTE]
+> This is an independent community project from [99Ways](https://99ways.io). It is not affiliated with or endorsed by PostHog.
 
-1. **Run PostHog-backed A/B and multivariate experiments.** It resolves string variants such as `control`, `test_group_1`, or `test_group_2` through `window.posthog`. Boolean flags follow the convention `true` → `test` and `false` → the configured default variant.
-2. **Apply declarative DOM variations.** A variant can target any CSS selector, update every matching element, set inline styles with `!important`, replace `innerText`, or replace `innerHTML` with trusted markup.
-3. **Fail safely to a known experience.** Late or non-responsive PostHog initialization, empty or disabled flags, and unconfigured variant names fall back to `control` or a custom `defaultVariant` after a configurable deadline.
-4. **Force variants through the URL for QA.** A query parameter named after the feature flag takes precedence over PostHog, allowing a configured variant to be previewed before its PostHog flag or rollout exists.
-5. **Mix DOM updates and custom functions.** A variant can contain selector-based updates, standalone functions, or both in the order they should run. A variant may also be represented by one standalone function.
-6. **Run per-element callbacks.** An update callback runs for every matching element and receives both the element and the active variant name.
-7. **Coordinate PostHog, flag, and DOM readiness.** The kit waits for a late-loading initialized PostHog instance and its first feature-flag notification while also awaiting `DOMContentLoaded`. If the overall feature-flag deadline expires first, it uses the default variant.
-8. **Run multiple independent experiments on the same page.** Each `runExperiment()` invocation has its own feature flag, variants, fallback, timeout, and debug state.
-9. **Return the applied variant asynchronously.** `runExperiment()` returns a promise that resolves to the activated variant after its synchronous handlers have been invoked.
-10. **Expose opt-in diagnostics.** `debug: true` enables lifecycle logs and warnings; production usage is silent by default.
-11. **Work as a typed module or browser bundle.** TypeScript consumers can import `runExperiment` and its public configuration types. The minified IIFE build exposes `window.runExperiment` for direct use in a script tag.
+## Why it exists
 
-### Current boundaries
+A direct `posthog.getFeatureFlag()` call is enough for a simple product branch. Page experiments tend to repeat more browser-side work:
 
-- An experiment applies once to the elements matching when it runs. The kit does not observe elements added later, revert mutations, or clean up previous effects.
-- The default variant must be registered if fallback should perform updates. Otherwise fallback intentionally becomes a no-op.
-- Custom functions and element callbacks are synchronous from the kit's perspective: returned promises are not awaited, and a thrown error stops the remaining handlers.
-- `innerHTML` is assigned directly and is not sanitized; only pass markup you trust.
+- wait for the page and PostHog to become ready;
+- exclude visitors who cannot receive the change before recording an exposure;
+- map variants and apply several DOM or custom-code steps;
+- fall back safely when a flag is late, disabled, or misconfigured;
+- let reviewers force a variant through the URL.
 
-## Install and build
+PostHog Page Experiments packages that execution logic without replacing PostHog's feature flags, experiment analysis, or no-code tools.
+
+## Install
 
 ```bash
-bun install
-bun run build
+npm install @99ways/posthog-page-experiments posthog-js
 ```
 
-This writes the browser bundle to `dist/index.js`. Rebuild only when the TypeScript source changes.
+The package has no runtime dependencies. It works with an existing PostHog browser client, whether you pass that client directly or expose it as `window.posthog`.
 
 ## Quick start
 
-Include the built bundle before the experiment code, then call `runExperiment()` with the feature-flag key and complete variant configuration:
+```ts
+import { runExperiment } from '@99ways/posthog-page-experiments'
+import posthog from 'posthog-js'
+
+posthog.init('YOUR_PROJECT_KEY', {
+  api_host: 'https://us.i.posthog.com',
+})
+
+const activeVariant = await runExperiment('pricing-page-headline', {
+  posthog,
+
+  // Checked before PostHog evaluates the flag. Ineligible visitors return null
+  // and are not included in the experiment by this call.
+  isEligible: () => document.querySelector('.pricing-hero') !== null,
+
+  variants: {
+    control: [],
+    test: [
+      {
+        selector: '.pricing-hero h1',
+        updates: {
+          innerText: 'A clearer reason to choose the product',
+        },
+      },
+    ],
+  },
+})
+
+console.log(activeVariant) // 'control', 'test', another configured variant, or null
+```
+
+The default variant must be present in `variants`. An empty `control: []` keeps the original page unchanged while making fallback behavior explicit.
+
+### Direct browser script
+
+After `0.1.0` is published, the minified browser build will be available from npm CDNs:
 
 ```html
+<script src="https://cdn.jsdelivr.net/npm/@99ways/posthog-page-experiments@0.1.0/dist/posthog-page-experiments.min.js"></script>
 <script>
-  // contents of dist/index.js
-</script>
-<script>
-  runExperiment('01-checkout-message-feature-flag', {
+  window.runExperiment('pricing-page-headline', {
+    isEligible: () => document.querySelector('.pricing-hero') !== null,
     variants: {
       control: [],
-      test_group_1: [
+      test: [
         {
-          selector: '.checkout-message',
-          updates: {
-            style: { display: 'block' },
-            innerText: 'Free delivery',
-          },
+          selector: '.pricing-hero h1',
+          updates: { innerText: 'A clearer reason to choose the product' },
         },
       ],
     },
@@ -60,156 +84,161 @@ Include the built bundle before the experiment code, then call `runExperiment()`
 </script>
 ```
 
-See the [examples](./examples) for complete configurations.
+Load PostHog before the experiment code, or let the package wait up to `featureFlagTimeoutMs` for a late-loading `window.posthog` client.
 
-## API
+## Protect experiment validity with eligibility
 
-### `runExperiment(featureFlag, options?)`
+PostHog records an experiment exposure when your code evaluates the flag. If a visitor cannot receive the page change—because the relevant page, state, or element is absent—evaluate that condition first:
 
-- `featureFlag`: the PostHog feature-flag key for this experiment.
-- `options.defaultVariant`: variant used when PostHog is unavailable, the flag resolves to an unregistered variant, or its value is `false`, `undefined`, or `''`. Defaults to `control`.
-- `options.variants`: a map of variant name to its handler. Each handler can be a standalone function or an array containing DOM configurations and standalone functions.
-- `options.debug`: enables lifecycle logs and diagnostic warnings for readiness, PostHog resolution, fallback, missing selectors, and application. Defaults to `false`.
-- `options.featureFlagTimeoutMs`: total time allowed for an initialized `window.posthog` to become available and deliver its first feature-flag notification. Defaults to `4000` and must be a finite, non-negative number.
-
-It creates and runs the experiment immediately. It returns a `Promise<string>` that resolves to the activated variant after synchronous application finishes:
-
-```js
-const activeVariant = await runExperiment('01-checkout-message-feature-flag', {
-  variants: {
-    control: [],
-    test_group_1: [],
+```ts
+runExperiment('checkout-reassurance', {
+  isEligible: async () => {
+    const checkout = document.querySelector('[data-checkout]')
+    const hasExistingOrder = await hasCompletedOrder()
+    return checkout !== null && !hasExistingOrder
   },
-})
-
-console.log(activeVariant)
-```
-
-### Variant handlers
-
-A variant handler supports three forms.
-
-#### DOM configuration array
-
-```js
-runExperiment('product-layout', {
   variants: {
     control: [],
     test: [
       {
-        selector: '.product-message',
+        selector: '[data-checkout-reassurance]',
+        updates: { innerText: 'Free returns within 30 days' },
+      },
+    ],
+  },
+})
+```
+
+`isEligible` runs after `DOMContentLoaded` and before the URL override or PostHog is read. It may be synchronous or asynchronous. A false result resolves `runExperiment()` to `null`; an error rejects the promise without evaluating the flag.
+
+Eligibility should describe who can actually receive the tested experience. It is not a replacement for audience targeting in PostHog.
+
+## QA a variant through the URL
+
+Add a query parameter whose name is the feature-flag key:
+
+```text
+https://example.com/pricing?pricing-page-headline=test
+```
+
+A configured URL variant takes precedence over PostHog, which makes review possible before a rollout exists. Eligibility still runs first. An unknown variant falls back to the configured default.
+
+## Choose the right tool
+
+Use this package when:
+
+- you are changing an existing server-rendered or static page;
+- the variant needs a few DOM changes or custom browser functions;
+- PostHog already owns assignment and experiment analysis;
+- eligibility, fallback, and repeatable QA matter.
+
+Use raw PostHog feature-flag calls when the flag is already part of your application's render logic. Use PostHog's no-code tooling when the change can be authored and maintained there without custom execution logic. This package is deliberately not a visual editor, framework wrapper, or experiment-analysis SDK.
+
+## API
+
+### `runExperiment(featureFlag, options)`
+
+Returns `Promise<string | null>`:
+
+- the applied variant name when the visitor is eligible;
+- `null` when browser globals are unavailable or `isEligible` returns false.
+
+The promise rejects if eligibility or a variant handler throws.
+
+| Option | Type | Default | Purpose |
+| --- | --- | --- | --- |
+| `variants` | `Record<string, VariantHandler>` | Required | Complete map of supported variants. Must include the default. |
+| `defaultVariant` | `string` | `control` | Used for unavailable, disabled, empty, timed-out, or unknown flag values. |
+| `isEligible` | `() => boolean \| PromiseLike<boolean>` | `() => true` | Runs before the flag is evaluated. |
+| `posthog` | `PostHogClient` | `window.posthog` | Explicit initialized client for module use. |
+| `featureFlagTimeoutMs` | `number` | `4000` | Maximum wait for PostHog and its first feature-flag notification. |
+| `debug` | `boolean` | `false` | Enables lifecycle and fallback diagnostics. |
+
+Boolean flags map `true` to `test` and `false` to the default variant. String-valued flags map directly to the matching configured variant.
+
+### Variant handlers
+
+A variant can be one function or an ordered array containing DOM changes and functions:
+
+```ts
+runExperiment('offer-card', {
+  variants: {
+    control: [],
+    test: [
+      {
+        selector: '.offer-card',
         updates: {
           style: {
-            display: 'block',
             backgroundColor: '#111827',
+            color: '#ffffff',
             padding: '24px',
           },
-          innerText: 'Free delivery',
+          innerText: 'A focused offer',
           callback(element, variant) {
             element.dataset.experimentVariant = variant
           },
         },
       },
-    ],
-  },
-})
-```
-
-- `selector`: any CSS selector. Updates apply to every matching `HTMLElement`.
-- `updates.style`: CSS properties applied with `!important`. camelCase names are converted to kebab-case and CSS custom properties pass through unchanged. Numeric values are stringified without units, so use strings such as `'24px'` where required.
-- `updates.innerText`: replaces the element's plain text.
-- `updates.innerHTML`: replaces the element's HTML without sanitization.
-- `updates.callback(element, variant)`: runs after the declarative updates for each matching element.
-
-#### Standalone function
-
-Use one function when the entire variant needs custom logic:
-
-```js
-runExperiment('cart-message', {
-  variants: {
-    control: [],
-    test() {
-      document.documentElement.dataset.cartExperiment = 'test'
-    },
-  },
-})
-```
-
-#### Mixed configuration and functions
-
-An array can mix DOM configurations and standalone functions. Entries run in array order:
-
-```js
-runExperiment('cart-layout', {
-  variants: {
-    control: [],
-    test: [
-      {
-        selector: '.cart-title',
-        updates: { innerText: 'Your new cart' },
-      },
       () => {
-        document.documentElement.dataset.cartLayout = 'test'
+        document.documentElement.dataset.hasOfferExperiment = 'true'
       },
     ],
   },
 })
 ```
 
-## How it works
+- Every matching element is updated.
+- Style names may be camelCase, kebab-case, or CSS custom properties. Values are stringified and applied with `!important`; include units such as `'24px'` when needed.
+- `innerText` replaces plain text.
+- `innerHTML` is assigned without sanitization. Only use trusted markup.
+- Element callbacks and custom functions run synchronously in array order. Returned promises are not awaited.
 
-1. `runExperiment()` creates the internal experiment and starts variant resolution and DOM readiness concurrently.
-2. A query parameter matching the feature-flag name takes precedence over PostHog.
-3. Otherwise, the kit waits up to `featureFlagTimeoutMs` for an initialized `window.posthog`, listens for its first `onFeatureFlags` notification, then reads `getFeatureFlag(featureFlag)` from the current initialized SDK. This prevents a replaced PostHog bootstrap object from forcing the fallback variant.
-4. Boolean `true` maps to `test`; `false`, `undefined`, and `''` map to `defaultVariant`; other strings are used as variant names.
-5. If PostHog or its flags miss the deadline, or the resolved variant is not configured, the kit selects `defaultVariant`.
-6. At the same time, the kit waits for `DOMContentLoaded`, skipping that wait if the DOM is already ready.
-7. Once both are ready, it applies the active variant and resolves the returned promise.
+## Flicker and loading strategy
 
-The query-string override bypasses PostHog and its feature-flag deadline. On PostHog success or timeout, the kit clears readiness polling and timers and unsubscribes from PostHog.
+This package waits for DOM readiness, eligibility, and the PostHog flag before changing the page. A client-rendered visual treatment can therefore flash the original experience.
 
-## Testing in production
+For visible above-the-fold changes:
 
-Force a configured variant by adding a query parameter named after the feature flag:
+1. load PostHog and the experiment code as early as your performance budget allows;
+2. bootstrap or cache PostHog flags when your architecture supports it;
+3. hide only the specific experiment target with a short, fail-safe timeout when a flash would be worse than a brief concealment;
+4. prefer server-side or application-rendered variants when flicker-free rendering is essential.
 
-```text
-https://example.com/?01-checkout-message-feature-flag=test_group_1
-```
+The package does not inject a global anti-flicker snippet because a generic page-hiding strategy can damage Core Web Vitals and trap content when scripts fail.
 
-This bypasses PostHog, allowing you to test before the flag exists or before your visitor is enrolled.
+## Current boundaries
 
-## Debugging
+- Variants apply once. The package does not observe later SPA mutations, revert changes, or clean up effects.
+- Selectors that match nothing are skipped. Use `isEligible` when a missing target means the visitor must not enter the experiment.
+- Handlers are synchronous from the package's perspective; asynchronous work inside them is not awaited.
+- A thrown handler error stops the remaining steps and rejects the returned promise.
+- The package runs in browsers. Importing it during server rendering is safe, but calling it without browser globals resolves to `null`.
 
-Debugging is disabled by default. Enable it per experiment:
-
-```js
-runExperiment('01-checkout-message-feature-flag', {
-  debug: true,
-  variants: {
-    control: [],
-    test_group_1: [],
-  },
-})
-```
-
-Debug output includes readiness progress, query or PostHog resolution, the activated variant, selector match counts, handler counts, completion, and fallback/error warnings. Every message is prefixed with its feature flag:
-
-```text
-[Experiment:01-checkout-message-feature-flag] Activated variant 'test_group_1'.
-```
-
-The debug option only controls messages emitted by the kit. Logs inside your functions and callbacks are unaffected.
-
-## Commands
+## Try the local demo
 
 ```bash
 bun install
-bun run build
-bun run test
+bun run demo
 ```
 
-## Notes
+Open the URL printed in the terminal. The demo uses the same URL override as production QA, so it works without a PostHog account.
 
-- The browser bundle attaches `runExperiment` to `window`.
-- Ensure the page loads `dist/index.js` before calling `runExperiment()`.
+More neutral examples are in [`examples/`](./examples).
+
+## Development
+
+```bash
+bun install
+bun run typecheck
+bun run test
+bun run build
+bun run check:package
+```
+
+Unit tests cover the execution contract. Playwright loads the shipped IIFE bundle in Chromium with an actual `posthog-js` client.
+
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for contribution guidance and [SECURITY.md](./SECURITY.md) for private vulnerability reporting.
+
+## License
+
+[MIT](./LICENSE) © 99Ways
