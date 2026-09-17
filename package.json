@@ -41,7 +41,9 @@
   "types": "./dist/index.d.ts",
   "unpkg": "./dist/posthog-page-experiments.min.js",
   "jsdelivr": "./dist/posthog-page-experiments.min.js",
-  "sideEffects": false,
+  "sideEffects": [
+    "./dist/posthog-page-experiments.min.js"
+  ],
   "publishConfig": {
     "access": "public",
     "provenance": true
