@@ -161,7 +161,7 @@ runExperiment('cart-layout', {
 
 1. `runExperiment()` creates the internal experiment and starts variant resolution and DOM readiness concurrently.
 2. A query parameter matching the feature-flag name takes precedence over PostHog.
-3. Otherwise, the kit waits up to `featureFlagTimeoutMs` for an initialized `window.posthog`, listens for its first `onFeatureFlags` notification, and calls `getFeatureFlag(featureFlag)`.
+3. Otherwise, the kit waits up to `featureFlagTimeoutMs` for an initialized `window.posthog`, listens for its first `onFeatureFlags` notification, then reads `getFeatureFlag(featureFlag)` from the current initialized SDK. This prevents a replaced PostHog bootstrap object from forcing the fallback variant.
 4. Boolean `true` maps to `test`; `false`, `undefined`, and `''` map to `defaultVariant`; other strings are used as variant names.
 5. If PostHog or its flags miss the deadline, or the resolved variant is not configured, the kit selects `defaultVariant`.
 6. At the same time, the kit waits for `DOMContentLoaded`, skipping that wait if the DOM is already ready.
