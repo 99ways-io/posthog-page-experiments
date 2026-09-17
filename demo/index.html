@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>PostHog Page Experiments demo</title>
+    <style>
+      :root { color-scheme: light; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+      * { box-sizing: border-box; }
+      body { margin: 0; background: #f7f5ef; color: #1d1f20; }
+      main { width: min(720px, calc(100% - 40px)); margin: 12vh auto; }
+      .eyebrow { color: #6d5b37; font-size: 13px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+      h1 { max-width: 680px; margin: 16px 0; font-size: clamp(42px, 8vw, 76px); line-height: .98; letter-spacing: -.055em; }
+      p { max-width: 590px; color: #565b5d; font-size: 19px; line-height: 1.6; }
+      nav { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 32px; }
+      a { border: 1px solid #1d1f20; border-radius: 999px; color: inherit; padding: 11px 17px; text-decoration: none; }
+      a:hover { background: #1d1f20; color: #fff; }
+      code { border-radius: 5px; background: #e9e4d8; padding: 2px 5px; }
+      output { display: block; margin-top: 24px; color: #6d5b37; font: 14px ui-monospace, monospace; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="eyebrow">Local URL-override demo</div>
+      <h1 data-demo-title>Ship page experiments without repeating the plumbing.</h1>
+      <p>
+        Choose a variant below. The query parameter forces it without a PostHog
+        account—the same path reviewers can use for production QA.
+      </p>
+      <nav aria-label="Demo variants">
+        <a href="/?demo-headline=control">Control</a>
+        <a href="/?demo-headline=test">Test</a>
+      </nav>
+      <output data-result>Waiting for a variant…</output>
+    </main>
+
+    <script src="/dist/posthog-page-experiments.min.js"></script>
+    <script>
+      window.runExperiment('demo-headline', {
+        featureFlagTimeoutMs: 0,
+        isEligible: () => document.querySelector('[data-demo-title]') !== null,
+        variants: {
+          control: [],
+          test: [
+            {
+              selector: '[data-demo-title]',
+              updates: {
+                innerText: 'Run the page experiment. Keep PostHog in charge.',
+                style: { color: '#d04a28' },
+              },
+            },
+          ],
+        },
+      }).then((variant) => {
+        document.querySelector('[data-result]').textContent = `Applied variant: ${variant}`
+      })
+    </script>
+  </body>
+</html>
