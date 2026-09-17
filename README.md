@@ -214,6 +214,14 @@ The package does not inject a global anti-flicker snippet because a generic page
 - A thrown handler error stops the remaining steps and rejects the returned promise.
 - The package runs in browsers. Importing it during server rendering is safe, but calling it without browser globals resolves to `null`.
 
+## Compatibility and versioning
+
+The distributed JavaScript targets modern evergreen browsers and uses standard browser APIs including `Promise`, `URLSearchParams`, and `querySelectorAll`.
+
+There is no runtime dependency on `posthog-js`. Compatibility is structural: the client must expose `__loaded`, `onFeatureFlags()`, and `getFeatureFlag()`. CI tests the current release against `posthog-js` 1.433.9 in Chromium.
+
+The project follows Semantic Versioning. Before `1.0.0`, breaking public-API changes may ship in a minor release; they will be called out in the changelog. The internal experiment class is not part of the public contract.
+
 ## Try the local demo
 
 ```bash
