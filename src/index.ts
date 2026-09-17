@@ -184,7 +184,15 @@ export class Experiment {
           this.log('PostHog is initialized; subscribing to feature flags.')
           unsubscribe = posthog.onFeatureFlags(() => {
             try {
-              const flagValue = posthog.getFeatureFlag(this.featureFlag)
+              // PostHog can replace the object used during subscription while
+              // the queued callback remains attached to the original reference.
+              // Always evaluate through the current initialized SDK so the
+              // rendered variant matches PostHog's recorded assignment.
+              const currentPostHog = this.getPostHog()
+              if (!currentPostHog) {
+                throw new Error('The initialized PostHog instance is no longer available.')
+              }
+              const flagValue = currentPostHog.getFeatureFlag(this.featureFlag)
               const variant = this.mapFeatureFlagValue(flagValue)
               this.log(`PostHog resolved variant '${variant}' from raw value ${JSON.stringify(flagValue)}.`)
               finish(variant)

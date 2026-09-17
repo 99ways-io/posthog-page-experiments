@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, spyOn, test } from 'bun:test'
 import type { PostHog } from 'posthog-js'
-import { createExperiment } from '.'
+import { runExperiment } from '.'
 
 type FeatureFlagsCallback = Parameters<PostHog['onFeatureFlags']>[0]
 
@@ -45,10 +45,14 @@ function createElement() {
 function createPostHog(value: boolean | string | undefined) {
   let callback: FeatureFlagsCallback | undefined
   let unsubscribed = false
+  let featureFlagReads = 0
 
   const posthog = {
     __loaded: true,
-    getFeatureFlag: () => value,
+    getFeatureFlag: () => {
+      featureFlagReads += 1
+      return value
+    },
     onFeatureFlags: (nextCallback: FeatureFlagsCallback) => {
       callback = nextCallback
       return () => { unsubscribed = true }
@@ -58,6 +62,7 @@ function createPostHog(value: boolean | string | undefined) {
   return {
     posthog,
     emit: () => callback?.([], {}, { errorsLoading: false }),
+    featureFlagReads: () => featureFlagReads,
     wasUnsubscribed: () => unsubscribed,
   }
 }
@@ -95,7 +100,7 @@ describe('Experiment', () => {
     const featureFlags = createPostHog('test')
     installBrowser(document, '', featureFlags.posthog)
 
-    const run = createExperiment('banner-test', {
+    const run = runExperiment('banner-test', {
       variants: {
         control: [],
         test: [{ selector: '.banner', updates: { style: { display: 'block' } } }]
@@ -119,7 +124,7 @@ describe('Experiment', () => {
       const featureFlags = createPostHog(flagValue)
       installBrowser(document, '', featureFlags.posthog)
 
-      const run = createExperiment('boolean-test', { variants: { control: [], test: [] } })
+      const run = runExperiment('boolean-test', { variants: { control: [], test: [] } })
 
       featureFlags.emit()
       expect(await run).toBe(expectedVariant)
@@ -133,7 +138,7 @@ describe('Experiment', () => {
     installBrowser(document, '', featureFlags.posthog)
     let controlRuns = 0
 
-    const run = createExperiment('unknown-test', {
+    const run = runExperiment('unknown-test', {
       variants: {
         control: [() => { controlRuns += 1 }],
         test: []
@@ -151,7 +156,7 @@ describe('Experiment', () => {
     installBrowser(document, '?url-test=test')
     let testRuns = 0
 
-    const variant = await createExperiment('url-test', {
+    const variant = await runExperiment('url-test', {
       variants: {
         control: [],
         test: [
@@ -172,7 +177,7 @@ describe('Experiment', () => {
     installBrowser(document, '?callback-test=test')
     let callbackVariant: string | undefined
 
-    await createExperiment('callback-test', {
+    await runExperiment('callback-test', {
       variants: {
         control: [],
         test: [
@@ -198,7 +203,7 @@ describe('Experiment', () => {
     installBrowser(document)
     let baselineRuns = 0
 
-    const variant = await createExperiment('constructor-test', {
+    const variant = await runExperiment('constructor-test', {
       defaultVariant: 'baseline',
       featureFlagTimeoutMs: 1,
       variants: {
@@ -219,7 +224,7 @@ describe('Experiment', () => {
     const log = spyOn(console, 'log').mockImplementation(() => { })
 
     try {
-      await createExperiment('silent-test', {
+      await runExperiment('silent-test', {
         featureFlagTimeoutMs: 1,
         variants: { control: [] },
       })
@@ -240,7 +245,7 @@ describe('Experiment', () => {
     const log = spyOn(console, 'log').mockImplementation(() => { })
 
     try {
-      await createExperiment('debug-test', {
+      await runExperiment('debug-test', {
         debug: true,
         featureFlagTimeoutMs: 1,
         variants: { control: [] },
@@ -271,7 +276,7 @@ describe('Experiment', () => {
     let callbackVariant: string | undefined
     let functionRuns = 0
 
-    await createExperiment('all-updates', {
+    await runExperiment('all-updates', {
       variants: {
         control: [],
         test: [
@@ -309,7 +314,7 @@ describe('Experiment', () => {
     installBrowser(document, '?invalid-url-test=not-configured')
     let controlRuns = 0
 
-    const variant = await createExperiment('invalid-url-test', {
+    const variant = await runExperiment('invalid-url-test', {
       variants: {
         control: () => { controlRuns += 1 },
         test: [],
@@ -326,7 +331,7 @@ describe('Experiment', () => {
     installBrowser(document)
     const featureFlags = createPostHog('test')
 
-    const run = createExperiment('late-posthog-test', {
+    const run = runExperiment('late-posthog-test', {
       featureFlagTimeoutMs: 250,
       variants: { control: [], test: [] },
     })
@@ -340,12 +345,39 @@ describe('Experiment', () => {
     expect(featureFlags.wasUnsubscribed()).toBe(true)
   })
 
+  test('reads the flag from the current PostHog SDK after the subscribed instance is replaced', async () => {
+    const document = new FakeDocument()
+    document.finishLoading()
+    const subscribedPostHog = createPostHog('control')
+    const currentPostHog = createPostHog('test')
+    installBrowser(document, '', subscribedPostHog.posthog)
+    let controlRuns = 0
+    let testRuns = 0
+
+    const run = runExperiment('sdk-replacement-test', {
+      variants: {
+        control: () => { controlRuns += 1 },
+        test: () => { testRuns += 1 },
+      },
+    })
+
+    window.posthog = currentPostHog.posthog
+    subscribedPostHog.emit()
+
+    expect(await run).toBe('test')
+    expect(controlRuns).toBe(0)
+    expect(testRuns).toBe(1)
+    expect(subscribedPostHog.featureFlagReads()).toBe(0)
+    expect(currentPostHog.featureFlagReads()).toBe(1)
+    expect(subscribedPostHog.wasUnsubscribed()).toBe(true)
+  })
+
   test('starts and caches readiness during construction', async () => {
     const document = new FakeDocument()
     document.finishLoading()
     installBrowser(document)
     const featureFlags = createPostHog('test')
-    const experiment = createExperiment('eager-readiness-test', {
+    const experiment = runExperiment('eager-readiness-test', {
       featureFlagTimeoutMs: 250,
       variants: { control: [], test: [] },
     })
@@ -365,7 +397,7 @@ describe('Experiment', () => {
     installBrowser(document, '', featureFlags.posthog)
     let controlRuns = 0
 
-    const variant = await createExperiment('posthog-timeout-test', {
+    const variant = await runExperiment('posthog-timeout-test', {
       featureFlagTimeoutMs: 5,
       variants: {
         control: () => { controlRuns += 1 },
@@ -379,7 +411,7 @@ describe('Experiment', () => {
   })
 
   test('rejects invalid feature-flag timeout values', () => {
-    expect(() => createExperiment('invalid-timeout-test', {
+    expect(() => runExperiment('invalid-timeout-test', {
       featureFlagTimeoutMs: -1,
     })).toThrow(
       'featureFlagTimeoutMs must be a finite number greater than or equal to 0.',
