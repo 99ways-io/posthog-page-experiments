@@ -1,9 +1,21 @@
 export type Awaitable<T> = T | PromiseLike<T>
 
+export interface PostHogFeatureFlagDetails {
+  reason?: { code?: string | null, description?: string | null } | null
+}
+
 export interface PostHogClient {
   __loaded?: boolean
   getFeatureFlag(featureFlag: string): boolean | string | null | undefined
   onFeatureFlags(callback: () => void): (() => void) | void
+  /** Optional. Read for the assignment summary when the client provides it. */
+  featureFlags?: {
+    getFeatureFlagDetails?(featureFlag: string): PostHogFeatureFlagDetails | null | undefined
+  }
+  /** Optional. Read for the assignment summary when the client provides it. */
+  get_property?(property: string): unknown
+  /** Optional. Read for the assignment summary when the client provides it. */
+  get_distinct_id?(): string
 }
 
 export type StyleUpdates = Record<string, string | number | null | undefined>
@@ -23,11 +35,37 @@ export interface ElementChange {
 export type VariantStep = ElementChange | (() => unknown)
 export type VariantHandler = VariantStep[] | (() => unknown)
 
+/**
+ * `summary` logs one assignment line per run, `debug` adds step-by-step diagnostics,
+ * and `silent` logs nothing.
+ */
+export type ExperimentLogLevel = 'silent' | 'summary' | 'debug'
+
+export type AssignmentSource = 'url' | 'posthog' | 'fallback' | 'ineligible'
+
+/** What the assignment summary reports for one run. */
+export interface ExperimentAssignment {
+  featureFlag: string
+  /** The applied variant, or `null` when the visitor is ineligible. */
+  variant: string | null
+  source: AssignmentSource
+  /** The raw value PostHog returned. Present only when the source is `posthog`. */
+  flagValue?: boolean | string | null
+  /** PostHog's evaluation reason, such as "Matched condition set 1", when the client exposes it. */
+  reason?: string
+  deviceId?: string | null
+  distinctId?: string | null
+  /** A plain-language explanation when the default variant was shown for a specific cause. */
+  note?: string
+}
+
 export interface ExperimentOptions {
   variants: Record<string, VariantHandler>
   defaultVariant?: string
   isEligible?: () => Awaitable<boolean>
   posthog?: PostHogClient
+  log?: ExperimentLogLevel
+  /** Shorthand for `log: 'debug'`. Ignored when `log` is set. */
   debug?: boolean
   featureFlagTimeoutMs?: number
 }
@@ -36,13 +74,22 @@ export type ExperimentResult = string | null
 
 const DEFAULT_FEATURE_FLAG_TIMEOUT_MS = 4_000
 const POSTHOG_POLL_INTERVAL_MS = 50
+const DEBUG_QUERY_PARAM = 'experiment-debug'
+
+interface Resolution {
+  value: string
+  source: Exclude<AssignmentSource, 'ineligible'>
+  flagValue?: boolean | string | null
+  fallback?: 'timeout' | 'error'
+  client?: PostHogClient
+}
 
 class Experiment {
   private readonly variants: Map<string, VariantHandler>
   private readonly defaultVariant: string
   private readonly isEligible: () => Awaitable<boolean>
   private readonly explicitPostHog?: PostHogClient
-  private readonly debug: boolean
+  private logLevel: ExperimentLogLevel
   private readonly featureFlagTimeoutMs: number
   private runPromise: Promise<ExperimentResult> | null = null
 
@@ -58,8 +105,12 @@ class Experiment {
     this.variants = new Map(Object.entries(options.variants))
     this.isEligible = options.isEligible ?? (() => true)
     this.explicitPostHog = options.posthog
-    this.debug = options.debug ?? false
+    this.logLevel = options.log ?? (options.debug ? 'debug' : 'summary')
     this.featureFlagTimeoutMs = options.featureFlagTimeoutMs ?? DEFAULT_FEATURE_FLAG_TIMEOUT_MS
+
+    if (!['silent', 'summary', 'debug'].includes(this.logLevel)) {
+      throw new TypeError("log must be 'silent', 'summary', or 'debug'.")
+    }
 
     if (!Number.isFinite(this.featureFlagTimeoutMs) || this.featureFlagTimeoutMs < 0) {
       throw new RangeError('featureFlagTimeoutMs must be a finite number greater than or equal to 0.')
@@ -85,23 +136,41 @@ class Experiment {
       return null
     }
 
+    if (this.isDebugRequestedByUrl()) this.logLevel = 'debug'
+
     await this.waitForDOMContentLoaded()
 
     this.log('Checking eligibility before evaluating the feature flag.')
     if (!(await this.isEligible())) {
       this.log('Visitor is ineligible; skipping feature-flag evaluation and variant application.')
+      this.summarize({
+        featureFlag: this.featureFlag,
+        variant: null,
+        source: 'ineligible',
+        note: 'The visitor is not eligible, so the feature flag was not evaluated.',
+      })
       return null
     }
 
-    const resolvedVariant = await this.resolveVariant()
-    const activeVariant = this.getConfiguredVariantOrDefault(resolvedVariant)
+    const resolution = await this.resolveVariant()
+    const activeVariant = this.getConfiguredVariantOrDefault(resolution.value)
     this.log(`Activated variant '${activeVariant}'.`)
+    this.summarize(this.describeAssignment(resolution, activeVariant))
     this.applyVariant(activeVariant)
     return activeVariant
   }
 
   private getVariantFromQueryParam(): string | null {
     return new URLSearchParams(window.location.search).get(this.featureFlag)
+  }
+
+  // `?experiment-debug` enables debug logs for every experiment on the page;
+  // `?experiment-debug=flag-a,flag-b` limits them to the listed flags.
+  private isDebugRequestedByUrl(): boolean {
+    const value = new URLSearchParams(window.location.search).get(DEBUG_QUERY_PARAM)
+    if (value === null) return false
+    const keys = value.split(',').map((key) => key.trim()).filter(Boolean)
+    return keys.length === 0 || keys.includes('1') || keys.includes('true') || keys.includes(this.featureFlag)
   }
 
   private getPostHog(): PostHogClient | undefined {
@@ -119,15 +188,15 @@ class Experiment {
     return undefined
   }
 
-  private resolveVariant(): Promise<string> {
+  private resolveVariant(): Promise<Resolution> {
     const queryVariant = this.getVariantFromQueryParam()
     if (queryVariant) {
       this.log(`Using query-string override variant '${queryVariant}'.`)
-      return Promise.resolve(queryVariant)
+      return Promise.resolve({ value: queryVariant, source: 'url' })
     }
 
     this.log('Waiting for initialized PostHog and its first feature-flag notification.')
-    return new Promise<string>((resolve) => {
+    return new Promise<Resolution>((resolve) => {
       let settled = false
       let unsubscribe: (() => void) | undefined
       let unsubscribeWhenAvailable = false
@@ -153,11 +222,11 @@ class Experiment {
         if (!removePostHogSubscription()) unsubscribeWhenAvailable = true
       }
 
-      const finish = (variant: string) => {
+      const finish = (resolution: Resolution) => {
         if (settled) return
         settled = true
         cleanup()
-        resolve(variant)
+        resolve(resolution)
       }
 
       const subscribeToPostHog = (): boolean => {
@@ -183,13 +252,13 @@ class Experiment {
               const flagValue = currentPostHog.getFeatureFlag(this.featureFlag)
               const variant = this.mapFeatureFlagValue(flagValue)
               this.log(`PostHog resolved variant '${variant}' from raw value ${JSON.stringify(flagValue)}.`)
-              finish(variant)
+              finish({ value: variant, source: 'posthog', flagValue: flagValue ?? null, client: currentPostHog })
             } catch (error) {
               this.warn(
                 `Could not read feature flag '${this.featureFlag}'. Applying '${this.defaultVariant}'.`,
                 error,
               )
-              finish(this.defaultVariant)
+              finish({ value: this.defaultVariant, source: 'fallback', fallback: 'error' })
             }
           })
 
@@ -204,7 +273,7 @@ class Experiment {
             `Could not subscribe to feature flag '${this.featureFlag}'. Applying '${this.defaultVariant}'.`,
             error,
           )
-          finish(this.defaultVariant)
+          finish({ value: this.defaultVariant, source: 'fallback', fallback: 'error' })
           return true
         }
       }
@@ -213,7 +282,7 @@ class Experiment {
         this.warn(
           `Feature flag '${this.featureFlag}' was not resolved within ${this.featureFlagTimeoutMs}ms. Applying '${this.defaultVariant}'.`,
         )
-        finish(this.defaultVariant)
+        finish({ value: this.defaultVariant, source: 'fallback', fallback: 'timeout' })
       }, this.featureFlagTimeoutMs)
 
       if (!subscribeToPostHog()) {
@@ -237,6 +306,74 @@ class Experiment {
       `Variant '${variant}' is not configured for '${this.featureFlag}'. Applying '${this.defaultVariant}'.`,
     )
     return this.defaultVariant
+  }
+
+  private describeAssignment(resolution: Resolution, activeVariant: string): ExperimentAssignment {
+    const assignment: ExperimentAssignment = {
+      featureFlag: this.featureFlag,
+      variant: activeVariant,
+      source: resolution.source,
+    }
+    const shown = `'${activeVariant}' is shown`
+
+    if (resolution.source === 'url') {
+      assignment.note = activeVariant === resolution.value
+        ? 'Variant forced by the URL parameter; PostHog was not called.'
+        : `URL variant '${resolution.value}' is not configured, so ${shown}.`
+      return assignment
+    }
+
+    if (resolution.source === 'fallback') {
+      assignment.note = resolution.fallback === 'timeout'
+        ? `PostHog did not return feature flags within ${this.featureFlagTimeoutMs}ms, so ${shown}.`
+        : `The feature flag could not be read, so ${shown}.`
+      return assignment
+    }
+
+    const client = resolution.client
+    assignment.flagValue = resolution.flagValue ?? null
+    const reason = this.readSafely(() => {
+      const details = client?.featureFlags?.getFeatureFlagDetails?.(this.featureFlag)
+      return details?.reason?.description || details?.reason?.code || undefined
+    })
+    if (reason) assignment.reason = reason
+    if (typeof client?.get_property === 'function') {
+      assignment.deviceId = this.readSafely(() => this.asText(client.get_property?.('$device_id')))
+    }
+    if (typeof client?.get_distinct_id === 'function') {
+      assignment.distinctId = this.readSafely(() => this.asText(client.get_distinct_id?.()))
+    }
+
+    const flagValue = assignment.flagValue
+    if (flagValue === false || flagValue === null || flagValue === '') {
+      assignment.note = assignment.deviceId === null
+        ? `PostHog returned no variant, and this browser has no PostHog device ID. Flags that bucket by device cannot assign it, so ${shown}.`
+        : `PostHog returned no variant for this visitor, so ${shown}.`
+    } else if (activeVariant !== resolution.value) {
+      assignment.note = `Flag value '${resolution.value}' is not a configured variant, so ${shown}.`
+    }
+    return assignment
+  }
+
+  private readSafely<T>(read: () => T): T | undefined {
+    try {
+      return read()
+    } catch {
+      return undefined
+    }
+  }
+
+  private asText(value: unknown): string | null {
+    return typeof value === 'string' && value ? value : null
+  }
+
+  private summarize(assignment: ExperimentAssignment): void {
+    if (this.logLevel === 'silent') return
+    const origin = assignment.source === 'ineligible' ? 'not applied' : `from ${assignment.source}`
+    console.info(
+      `[Experiment:${this.featureFlag}] Variant ${assignment.variant === null ? 'none' : `'${assignment.variant}'`} (${origin}).`,
+      assignment,
+    )
   }
 
   private waitForDOMContentLoaded(): Promise<void> {
@@ -304,11 +441,11 @@ class Experiment {
   }
 
   private log(message: string, ...details: unknown[]): void {
-    if (this.debug) console.log(`[Experiment:${this.featureFlag}] ${message}`, ...details)
+    if (this.logLevel === 'debug') console.log(`[Experiment:${this.featureFlag}] ${message}`, ...details)
   }
 
   private warn(message: string, ...details: unknown[]): void {
-    if (this.debug) console.warn(`[Experiment:${this.featureFlag}] ${message}`, ...details)
+    if (this.logLevel === 'debug') console.warn(`[Experiment:${this.featureFlag}] ${message}`, ...details)
   }
 }
 

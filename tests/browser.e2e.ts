@@ -28,6 +28,33 @@ test('the shipped browser bundle works with an initialized posthog-js client', a
   await expect(page.locator('.hero-title')).toHaveText('Test headline')
 })
 
+test('the shipped browser bundle logs an assignment summary from posthog-js', async ({ page }) => {
+  const summaries: unknown[][] = []
+  page.on('console', async (message) => {
+    if (message.type() !== 'info' || !message.text().startsWith('[Experiment:summary-bundle-test]')) return
+    summaries.push(await Promise.all(message.args().map((arg) => arg.jsonValue())))
+  })
+  await page.setContent('<h1 class="hero-title">Original headline</h1>')
+  await page.addScriptTag({ path: posthogBundle })
+  await page.addScriptTag({ path: experimentBundle })
+
+  await page.evaluate(() => window.runExperiment('summary-bundle-test', {
+    variants: { control: [], test: [] },
+  }))
+
+  await expect.poll(() => summaries.length).toBe(1)
+  const [headline, assignment] = summaries[0] as [string, Record<string, unknown>]
+  expect(headline).toBe("[Experiment:summary-bundle-test] Variant 'control' (from posthog).")
+  expect(assignment).toMatchObject({
+    featureFlag: 'summary-bundle-test',
+    variant: 'control',
+    source: 'posthog',
+    flagValue: null,
+    distinctId: 'browser-test-user',
+  })
+  expect(String(assignment.note)).toContain('PostHog returned no variant')
+})
+
 test('the shipped browser bundle supports URL QA without PostHog', async ({ page }) => {
   await page.route('https://example.test/**', async (route) => {
     await route.fulfill({
