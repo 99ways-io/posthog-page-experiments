@@ -323,17 +323,25 @@ describe('runExperiment', () => {
     expect(featureFlags.wasUnsubscribed()).toBe(true)
   })
 
-  test('is silent by default and emits diagnostics only when enabled', async () => {
+  test('logs one assignment summary by default and step diagnostics only when enabled', async () => {
     const document = new FakeDocument()
     document.finishLoading()
     installBrowser(document, '?diagnostic-test=control')
     const warn = spyOn(console, 'warn').mockImplementation(() => {})
     const log = spyOn(console, 'log').mockImplementation(() => {})
+    const info = spyOn(console, 'info').mockImplementation(() => {})
 
     try {
       await runExperiment('diagnostic-test', { variants: { control: [] } })
       expect(warn).not.toHaveBeenCalled()
       expect(log).not.toHaveBeenCalled()
+      expect(info).toHaveBeenCalledTimes(1)
+      expect(info).toHaveBeenCalledWith("[Experiment:diagnostic-test] Variant 'control' (from url).", {
+        featureFlag: 'diagnostic-test',
+        variant: 'control',
+        source: 'url',
+        note: 'Variant forced by the URL parameter; PostHog was not called.',
+      })
 
       await runExperiment('diagnostic-test', {
         debug: true,
@@ -345,6 +353,154 @@ describe('runExperiment', () => {
     } finally {
       warn.mockRestore()
       log.mockRestore()
+      info.mockRestore()
+    }
+  })
+
+  test('logs nothing when log is silent', async () => {
+    const document = new FakeDocument()
+    document.finishLoading()
+    installBrowser(document, '?silent-test=test')
+    const spies = (['info', 'log', 'warn'] as const).map((method) => spyOn(console, method).mockImplementation(() => {}))
+
+    try {
+      expect(await runExperiment('silent-test', {
+        log: 'silent',
+        variants: { control: [], test: [] },
+      })).toBe('test')
+      spies.forEach((spy) => expect(spy).not.toHaveBeenCalled())
+    } finally {
+      spies.forEach((spy) => spy.mockRestore())
+    }
+  })
+
+  test('the experiment-debug URL parameter enables step diagnostics for listed flags', async () => {
+    const document = new FakeDocument()
+    document.finishLoading()
+    installBrowser(document, '?experiment-debug=url-debug-test&url-debug-test=test&other-test=test')
+    const log = spyOn(console, 'log').mockImplementation(() => {})
+    const info = spyOn(console, 'info').mockImplementation(() => {})
+
+    try {
+      await runExperiment('url-debug-test', { variants: { control: [], test: [] } })
+      expect(log).toHaveBeenCalledWith("[Experiment:url-debug-test] Activated variant 'test'.")
+      log.mockClear()
+
+      await runExperiment('other-test', { variants: { control: [], test: [] } })
+      expect(log).not.toHaveBeenCalled()
+    } finally {
+      log.mockRestore()
+      info.mockRestore()
+    }
+  })
+
+  test('summarizes a PostHog assignment with its reason and identifiers', async () => {
+    const document = new FakeDocument()
+    document.finishLoading()
+    const featureFlags = createPostHog('test')
+    Object.assign(featureFlags.posthog, {
+      featureFlags: {
+        getFeatureFlagDetails: () => ({ reason: { code: 'condition_match', description: 'Matched condition set 1' } }),
+      },
+      get_property: (property: string) => (property === '$device_id' ? 'device-1' : undefined),
+      get_distinct_id: () => 'person-1',
+    })
+    installBrowser(document, '', featureFlags.posthog)
+    const info = spyOn(console, 'info').mockImplementation(() => {})
+
+    try {
+      const result = runExperiment('summary-test', { variants: { control: [], test: [] } })
+      await waitForSubscription(featureFlags)
+      featureFlags.emit()
+
+      expect(await result).toBe('test')
+      expect(featureFlags.featureFlagReads()).toBe(1)
+      expect(info).toHaveBeenCalledWith("[Experiment:summary-test] Variant 'test' (from posthog).", {
+        featureFlag: 'summary-test',
+        variant: 'test',
+        source: 'posthog',
+        flagValue: 'test',
+        reason: 'Matched condition set 1',
+        deviceId: 'device-1',
+        distinctId: 'person-1',
+      })
+    } finally {
+      info.mockRestore()
+    }
+  })
+
+  test('explains a default variant caused by a missing PostHog device ID', async () => {
+    const document = new FakeDocument()
+    document.finishLoading()
+    const featureFlags = createPostHog(false)
+    Object.assign(featureFlags.posthog, {
+      featureFlags: {
+        getFeatureFlagDetails: () => ({ reason: { code: 'out_of_rollout_bound', description: 'Out of rollout bound' } }),
+      },
+      get_property: () => undefined,
+      get_distinct_id: () => 'returning-visitor',
+    })
+    installBrowser(document, '', featureFlags.posthog)
+    const info = spyOn(console, 'info').mockImplementation(() => {})
+
+    try {
+      const result = runExperiment('device-test', { variants: { control: [], test: [] } })
+      await waitForSubscription(featureFlags)
+      featureFlags.emit()
+
+      expect(await result).toBe('control')
+      const [, assignment] = info.mock.calls[0] as [string, Record<string, unknown>]
+      expect(assignment).toMatchObject({
+        variant: 'control',
+        source: 'posthog',
+        flagValue: false,
+        reason: 'Out of rollout bound',
+        deviceId: null,
+      })
+      expect(String(assignment.note)).toContain('no PostHog device ID')
+    } finally {
+      info.mockRestore()
+    }
+  })
+
+  test('summarizes timeouts, unknown variants, and ineligible visitors', async () => {
+    const document = new FakeDocument()
+    document.finishLoading()
+    const info = spyOn(console, 'info').mockImplementation(() => {})
+
+    try {
+      installBrowser(document, '', createPostHog('test').posthog)
+      expect(await runExperiment('timeout-summary', {
+        featureFlagTimeoutMs: 5,
+        variants: { control: [], test: [] },
+      })).toBe('control')
+      expect(info.mock.calls[0]?.[1]).toMatchObject({
+        source: 'fallback',
+        note: "PostHog did not return feature flags within 5ms, so 'control' is shown.",
+      })
+
+      installBrowser(document, '?unknown-summary=test_group_9')
+      expect(await runExperiment('unknown-summary', { variants: { control: [], test: [] } })).toBe('control')
+      expect(info.mock.calls[1]?.[1]).toMatchObject({
+        source: 'url',
+        note: "URL variant 'test_group_9' is not configured, so 'control' is shown.",
+      })
+
+      expect(await runExperiment('ineligible-summary', {
+        isEligible: () => false,
+        variants: { control: [], test: [] },
+      })).toBeNull()
+      expect(info.mock.calls[2]).toEqual([
+        '[Experiment:ineligible-summary] Variant none (not applied).',
+        {
+          featureFlag: 'ineligible-summary',
+          variant: null,
+          source: 'ineligible',
+          note: 'The visitor is not eligible, so the feature flag was not evaluated.',
+        },
+      ])
+    } finally {
+      info.mockRestore()
     }
   })
 
@@ -362,6 +518,10 @@ describe('runExperiment', () => {
       .toThrow('featureFlag must be a non-empty string.')
     expect(() => runExperiment('missing-default', { variants: { test: [] } }))
       .toThrow("variants must include the default variant 'control'.")
+    expect(() => runExperiment('invalid-log', {
+      log: 'verbose' as never,
+      variants: { control: [] },
+    })).toThrow("log must be 'silent', 'summary', or 'debug'.")
     expect(() => runExperiment('invalid-timeout', {
       featureFlagTimeoutMs: -1,
       variants: { control: [] },

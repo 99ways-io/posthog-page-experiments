@@ -64,10 +64,10 @@ The default variant must be present in `variants`. An empty `control: []` keeps 
 
 ### Direct browser script
 
-After `0.1.0` is published, the minified browser build will be available from npm CDNs:
+The minified browser build is available from npm CDNs:
 
 ```html
-<script src="https://cdn.jsdelivr.net/npm/@99ways/posthog-page-experiments@0.1.0/dist/posthog-page-experiments.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@99ways/posthog-page-experiments@0.2.0/dist/posthog-page-experiments.min.js"></script>
 <script>
   window.runExperiment('pricing-page-headline', {
     isEligible: () => document.querySelector('.pricing-hero') !== null,
@@ -123,6 +123,31 @@ https://example.com/pricing?pricing-page-headline=test
 
 A configured URL variant takes precedence over PostHog, which makes review possible before a rollout exists. Eligibility still runs first. An unknown variant falls back to the configured default.
 
+## See why a variant was shown
+
+Each run logs one assignment summary to the browser console:
+
+```text
+[Experiment:pricing-page-headline] Variant 'control' (from posthog). {
+  featureFlag: 'pricing-page-headline',
+  variant: 'control',
+  source: 'posthog',
+  flagValue: false,
+  reason: 'Out of rollout bound',
+  deviceId: null,
+  distinctId: 'anonymous-visitor-id',
+  note: "PostHog returned no variant, and this browser has no PostHog device ID. Flags that bucket by device cannot assign it, so 'control' is shown."
+}
+```
+
+- `source` is `posthog`, `url` (a URL override), `fallback` (PostHog unavailable, timed out or failed) or `ineligible`.
+- `reason`, `deviceId` and `distinctId` appear when the PostHog client exposes them. Recent `posthog-js` versions do.
+- `note` explains plainly when the default variant was shown for a specific cause.
+
+Reading these values does not record a feature-flag call.
+
+For the step-by-step lifecycle, add `?experiment-debug` to the URL; `?experiment-debug=flag-a,flag-b` limits it to the listed flags. Alternatively, pass `log: 'debug'`. Use `log: 'silent'` to turn all output off.
+
 ## Choose the right tool
 
 Use this package when:
@@ -152,7 +177,8 @@ The promise rejects if eligibility or a variant handler throws.
 | `isEligible` | `() => boolean \| PromiseLike<boolean>` | `() => true` | Runs before the flag is evaluated. |
 | `posthog` | `PostHogClient` | `window.posthog` | Explicit initialized client for module use. |
 | `featureFlagTimeoutMs` | `number` | `4000` | Maximum wait for PostHog and its first feature-flag notification. |
-| `debug` | `boolean` | `false` | Enables lifecycle and fallback diagnostics. |
+| `log` | `'summary' \| 'debug' \| 'silent'` | `'summary'` | Console output: one assignment summary, plus step-by-step diagnostics with `debug`, or nothing. |
+| `debug` | `boolean` | `false` | Shorthand for `log: 'debug'`. Ignored when `log` is set. |
 
 Boolean flags map `true` to `test` and `false` to the default variant. String-valued flags map directly to the matching configured variant.
 
@@ -218,7 +244,7 @@ The package does not inject a global anti-flicker snippet because a generic page
 
 The distributed JavaScript targets modern evergreen browsers and uses standard browser APIs including `Promise`, `URLSearchParams`, and `querySelectorAll`.
 
-There is no runtime dependency on `posthog-js`. Compatibility is structural: the client must expose `__loaded`, `onFeatureFlags()`, and `getFeatureFlag()`. CI tests the current release against `posthog-js` 1.433.9 in Chromium.
+There is no runtime dependency on `posthog-js`. Compatibility is structural: the client must expose `__loaded`, `onFeatureFlags()`, and `getFeatureFlag()`. The assignment summary also reads `featureFlags.getFeatureFlagDetails()`, `get_property()`, and `get_distinct_id()` when they exist. CI tests the current release against `posthog-js` 1.433.9 in Chromium.
 
 The project follows Semantic Versioning. Before `1.0.0`, breaking public-API changes may ship in a minor release; they will be called out in the changelog. The internal experiment class is not part of the public contract.
 
