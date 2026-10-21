@@ -323,6 +323,152 @@ describe('runExperiment', () => {
     expect(featureFlags.wasUnsubscribed()).toBe(true)
   })
 
+  test('applies the default without reading the flag when consent is withdrawn before flags arrive', async () => {
+    const document = new FakeDocument()
+    document.finishLoading()
+    const featureFlags = createPostHog('test')
+    let capturing = false
+    Object.assign(featureFlags.posthog, { is_capturing: () => capturing })
+    installBrowser(document, '', featureFlags.posthog)
+    let grantConsent!: () => void
+    const consent = new Promise<void>((resolve) => { grantConsent = resolve })
+    const info = spyOn(console, 'info').mockImplementation(() => {})
+    let testRuns = 0
+
+    try {
+      const result = runExperiment('withdrawn-test', {
+        isEligible: async () => {
+          await consent
+          return true
+        },
+        variants: {
+          control: [],
+          test: () => { testRuns += 1 },
+        },
+      })
+
+      capturing = true
+      grantConsent()
+      await waitForSubscription(featureFlags)
+      capturing = false
+      featureFlags.emit()
+
+      expect(await result).toBe('control')
+      expect(testRuns).toBe(0)
+      expect(featureFlags.featureFlagReads()).toBe(0)
+      expect(featureFlags.wasUnsubscribed()).toBe(true)
+      expect(info).toHaveBeenCalledWith("[Experiment:withdrawn-test] Variant 'control' (from fallback).", {
+        featureFlag: 'withdrawn-test',
+        variant: 'control',
+        source: 'fallback',
+        note: "PostHog was not capturing events, so the feature flag was not read and 'control' is shown.",
+      })
+    } finally {
+      info.mockRestore()
+    }
+  })
+
+  test('keeps the default for the page view when consent is granted again after the fallback', async () => {
+    const document = new FakeDocument()
+    document.finishLoading()
+    const featureFlags = createPostHog('test')
+    let capturing = false
+    Object.assign(featureFlags.posthog, { is_capturing: () => capturing })
+    installBrowser(document, '', featureFlags.posthog)
+    let testRuns = 0
+
+    const result = runExperiment('regrant-test', {
+      variants: {
+        control: [],
+        test: () => { testRuns += 1 },
+      },
+    })
+
+    await waitForSubscription(featureFlags)
+    featureFlags.emit()
+    expect(await result).toBe('control')
+
+    // The fake client keeps calling the listener after unsubscribing.
+    capturing = true
+    featureFlags.emit()
+
+    expect(testRuns).toBe(0)
+    expect(featureFlags.featureFlagReads()).toBe(0)
+  })
+
+  test('checks capture when the flags arrive, not when it subscribes', async () => {
+    const document = new FakeDocument()
+    document.finishLoading()
+    const featureFlags = createPostHog('test')
+    let capturing = false
+    Object.assign(featureFlags.posthog, { is_capturing: () => capturing })
+    installBrowser(document, '', featureFlags.posthog)
+
+    const result = runExperiment('capture-resumed-test', {
+      variants: { control: [], test: [] },
+    })
+
+    await waitForSubscription(featureFlags)
+    capturing = true
+    featureFlags.emit()
+
+    expect(await result).toBe('test')
+    expect(featureFlags.featureFlagReads()).toBe(1)
+  })
+
+  test('checks has_opted_out_capturing on clients without is_capturing', async () => {
+    const document = new FakeDocument()
+    document.finishLoading()
+    const featureFlags = createPostHog('test')
+    Object.assign(featureFlags.posthog, { has_opted_out_capturing: () => true })
+    installBrowser(document, '', featureFlags.posthog)
+
+    const result = runExperiment('opted-out-test', {
+      variants: { control: [], test: [] },
+    })
+
+    await waitForSubscription(featureFlags)
+    featureFlags.emit()
+
+    expect(await result).toBe('control')
+    expect(featureFlags.featureFlagReads()).toBe(0)
+  })
+
+  test('reads the flag when is_capturing reports cookieless capture', async () => {
+    const document = new FakeDocument()
+    document.finishLoading()
+    const featureFlags = createPostHog('test')
+    Object.assign(featureFlags.posthog, {
+      is_capturing: () => true,
+      has_opted_out_capturing: () => true,
+    })
+    installBrowser(document, '', featureFlags.posthog)
+
+    const result = runExperiment('cookieless-test', {
+      variants: { control: [], test: [] },
+    })
+
+    await waitForSubscription(featureFlags)
+    featureFlags.emit()
+
+    expect(await result).toBe('test')
+    expect(featureFlags.featureFlagReads()).toBe(1)
+  })
+
+  test('applies a URL override without reading PostHog while capture is off', async () => {
+    const document = new FakeDocument()
+    document.finishLoading()
+    const featureFlags = createPostHog('control')
+    Object.assign(featureFlags.posthog, { is_capturing: () => false })
+    installBrowser(document, '?preview-test=test', featureFlags.posthog)
+
+    expect(await runExperiment('preview-test', {
+      variants: { control: [], test: [] },
+    })).toBe('test')
+    expect(featureFlags.subscriptions()).toBe(0)
+    expect(featureFlags.featureFlagReads()).toBe(0)
+  })
+
   test('logs one assignment summary by default and step diagnostics only when enabled', async () => {
     const document = new FakeDocument()
     document.finishLoading()

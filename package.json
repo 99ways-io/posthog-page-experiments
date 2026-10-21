@@ -1,6 +1,6 @@
 {
   "name": "@99ways/posthog-page-experiments",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Code-first page experiments for PostHog with eligibility checks, URL QA overrides, and safe fallbacks.",
   "type": "module",
   "license": "MIT",
