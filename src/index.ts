@@ -16,6 +16,10 @@ export interface PostHogClient {
   get_property?(property: string): unknown
   /** Optional. Read for the assignment summary when the client provides it. */
   get_distinct_id?(): string
+  /** Optional. Checked before the flag is read; the flag is not read while it returns `false`. */
+  is_capturing?(): boolean
+  /** Optional. Checked when `is_capturing()` is unavailable; the flag is not read while it returns `true`. */
+  has_opted_out_capturing?(): boolean
 }
 
 export type StyleUpdates = Record<string, string | number | null | undefined>
@@ -80,7 +84,7 @@ interface Resolution {
   value: string
   source: Exclude<AssignmentSource, 'ineligible'>
   flagValue?: boolean | string | null
-  fallback?: 'timeout' | 'error'
+  fallback?: 'timeout' | 'error' | 'not-capturing'
   client?: PostHogClient
 }
 
@@ -188,6 +192,14 @@ class Experiment {
     return undefined
   }
 
+  // `is_capturing()` is also true while PostHog captures in cookieless mode, where
+  // `has_opted_out_capturing()` returns true. Clients with neither method are treated as capturing.
+  private isCapturing(posthog: PostHogClient): boolean {
+    if (typeof posthog.is_capturing === 'function') return posthog.is_capturing() !== false
+    if (typeof posthog.has_opted_out_capturing === 'function') return posthog.has_opted_out_capturing() !== true
+    return true
+  }
+
   private resolveVariant(): Promise<Resolution> {
     const queryVariant = this.getVariantFromQueryParam()
     if (queryVariant) {
@@ -243,10 +255,21 @@ class Experiment {
         try {
           this.log('PostHog is initialized; subscribing to feature flags.')
           const remove = posthog.onFeatureFlags(() => {
+            // A client that cannot unsubscribe may still notify after the run has finished.
+            if (settled) return
+
             try {
               const currentPostHog = this.getPostHog()
               if (!currentPostHog) {
                 throw new Error('The initialized PostHog instance is no longer available.')
+              }
+
+              // Reading the flag records the exposure. While capture is off, PostHog drops that
+              // event but still marks it as sent, so later reads would not record it either.
+              if (!this.isCapturing(currentPostHog)) {
+                this.log(`PostHog is not capturing events; not reading the flag. Applying '${this.defaultVariant}'.`)
+                finish({ value: this.defaultVariant, source: 'fallback', fallback: 'not-capturing' })
+                return
               }
 
               const flagValue = currentPostHog.getFeatureFlag(this.featureFlag)
@@ -324,9 +347,13 @@ class Experiment {
     }
 
     if (resolution.source === 'fallback') {
-      assignment.note = resolution.fallback === 'timeout'
-        ? `PostHog did not return feature flags within ${this.featureFlagTimeoutMs}ms, so ${shown}.`
-        : `The feature flag could not be read, so ${shown}.`
+      if (resolution.fallback === 'timeout') {
+        assignment.note = `PostHog did not return feature flags within ${this.featureFlagTimeoutMs}ms, so ${shown}.`
+      } else if (resolution.fallback === 'not-capturing') {
+        assignment.note = `PostHog was not capturing events, so the feature flag was not read and ${shown}.`
+      } else {
+        assignment.note = `The feature flag could not be read, so ${shown}.`
+      }
       return assignment
     }
 

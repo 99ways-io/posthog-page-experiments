@@ -67,7 +67,7 @@ The default variant must be present in `variants`. An empty `control: []` keeps 
 The minified browser build is available from npm CDNs:
 
 ```html
-<script src="https://cdn.jsdelivr.net/npm/@99ways/posthog-page-experiments@0.2.0/dist/posthog-page-experiments.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@99ways/posthog-page-experiments@0.2.1/dist/posthog-page-experiments.min.js"></script>
 <script>
   window.runExperiment('pricing-page-headline', {
     isEligible: () => document.querySelector('.pricing-hero') !== null,
@@ -113,6 +113,34 @@ runExperiment('checkout-reassurance', {
 
 Eligibility should describe who can actually receive the tested experience. It is not a replacement for audience targeting in PostHog.
 
+## Respect analytics consent
+
+Reading a feature flag records the visitor's exposure. While PostHog is not capturing events, it drops that exposure but still marks it as sent, so later reads do not record it either, even after the visitor opts in. The package therefore reads the flag only while PostHog is capturing. When the flags arrive while it is not, the package applies the default variant (`source: 'fallback'`):
+
+- A visitor who withdraws consent while the assignment waits for feature flags keeps the default variant for that page view. Opting in again on the same page does not change it: PostHog sends no new feature-flag notification on opt-in, and switching after the visitor has seen the default would mix two experiences under one exposure. The next page view assigns the visitor and records the exposure.
+- A visitor PostHog does not capture from the start, for example because of `opt_out_capturing_by_default` or `respect_dnt`, receives the default variant on any page view where capture is still off when the flags arrive.
+
+To assign visitors on the page view where they consent, make eligibility wait for consent:
+
+```ts
+let allowAnalytics = () => {}
+const analyticsConsent = new Promise<void>((resolve) => { allowAnalytics = resolve })
+// Call allowAnalytics() from your consent banner after posthog.opt_in_capturing().
+
+runExperiment('pricing-page-headline', {
+  isEligible: async () => {
+    await analyticsConsent
+    return document.querySelector('.pricing-hero') !== null
+  },
+  variants: {
+    control: [],
+    test: [{ selector: '.pricing-hero h1', updates: { innerText: 'A clearer reason to choose the product' } }],
+  },
+})
+```
+
+The check reads PostHog's own consent state, so a withdrawal must reach PostHog through `posthog.opt_out_capturing()`. A URL override reads no flag, so previews need no consent; skip the wait when the URL names a variant.
+
 ## QA a variant through the URL
 
 Add a query parameter whose name is the feature-flag key:
@@ -140,7 +168,7 @@ Each run logs one assignment summary to the browser console:
 }
 ```
 
-- `source` is `posthog`, `url` (a URL override), `fallback` (PostHog unavailable, timed out or failed) or `ineligible`.
+- `source` is `posthog`, `url` (a URL override), `fallback` (PostHog unavailable, not capturing, timed out or failed) or `ineligible`.
 - `reason`, `deviceId` and `distinctId` appear when the PostHog client exposes them. Recent `posthog-js` versions do.
 - `note` explains plainly when the default variant was shown for a specific cause.
 
@@ -173,7 +201,7 @@ The promise rejects if eligibility or a variant handler throws.
 | Option | Type | Default | Purpose |
 | --- | --- | --- | --- |
 | `variants` | `Record<string, VariantHandler>` | Required | Complete map of supported variants. Must include the default. |
-| `defaultVariant` | `string` | `control` | Used for unavailable, disabled, empty, timed-out, or unknown flag values. |
+| `defaultVariant` | `string` | `control` | Used for unavailable, disabled, empty, timed-out, or unknown flag values, and while PostHog is not capturing. |
 | `isEligible` | `() => boolean \| PromiseLike<boolean>` | `() => true` | Runs before the flag is evaluated. |
 | `posthog` | `PostHogClient` | `window.posthog` | Explicit initialized client for module use. |
 | `featureFlagTimeoutMs` | `number` | `4000` | Maximum wait for PostHog and its first feature-flag notification. |
@@ -244,7 +272,7 @@ The package does not inject a global anti-flicker snippet because a generic page
 
 The distributed JavaScript targets modern evergreen browsers and uses standard browser APIs including `Promise`, `URLSearchParams`, and `querySelectorAll`.
 
-There is no runtime dependency on `posthog-js`. Compatibility is structural: the client must expose `__loaded`, `onFeatureFlags()`, and `getFeatureFlag()`. The assignment summary also reads `featureFlags.getFeatureFlagDetails()`, `get_property()`, and `get_distinct_id()` when they exist. CI tests the current release against `posthog-js` 1.433.9 in Chromium.
+There is no runtime dependency on `posthog-js`. Compatibility is structural: the client must expose `__loaded`, `onFeatureFlags()`, and `getFeatureFlag()`. Before reading the flag, the package checks `is_capturing()` (posthog-js 1.260.0 and later; it stays true in cookieless mode), or `has_opted_out_capturing()` on clients without it; a client with neither is treated as capturing. The assignment summary also reads `featureFlags.getFeatureFlagDetails()`, `get_property()`, and `get_distinct_id()` when they exist. CI tests the current release against `posthog-js` 1.433.9 in Chromium.
 
 The project follows Semantic Versioning. Before `1.0.0`, breaking public-API changes may ship in a minor release; they will be called out in the changelog. The internal experiment class is not part of the public contract.
 
