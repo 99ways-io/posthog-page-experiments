@@ -232,6 +232,30 @@ For visible above-the-fold changes:
 
 The package does not inject a global anti-flicker snippet because a generic page-hiding strategy can damage Core Web Vitals and trap content when scripts fail.
 
+## Consent tools that hold PostHog back
+
+When a consent tool keeps PostHog off the page until consent, the package waits `featureFlagTimeoutMs`, applies the default variant and records nothing. [`examples/consent-switch.html`](./examples/consent-switch.html) lets PostHog assign the variant at page load and record the visitor only after consent, from inside the page.
+
+Use it only when all of these hold:
+
+- the consent tool blocks PostHog until consent (for example Cookiebot auto-blocking), or a plugin or tag manager loads PostHog only after consent;
+- visitors usually consent on the tested page itself, for example by clicking the banner or by scrolling;
+- the site owner has approved the requests the example sends before consent (see below);
+- the site's PostHog and consent configuration must stay as it is.
+
+Typical signs of the problem: the variant appears late or not at all, many assignments come `from fallback`, or far fewer visitors are exposed than view the page. Ad blockers and slow pages cause the same signs, so confirm first that PostHog is missing until consent.
+
+The example starts posthog-js at once with the site's own settings, opted out of capturing and persistence. When the visitor consents on that page view, posthog-js sends the page view and the exposure it held back, with the device ID it used for assignment; when they withdraw, it stops. Until consent nothing is stored, so each page view is assigned afresh: a reload can show the other variant, and consent given on a later page does not record this one. The defaults fit the PostHog for WordPress plugin with Cookiebot. For another setup, change its SETTINGS section and check that the consent tool does not block the posthog-js file the example loads.
+
+Before you use it:
+
+- Before consent, the browser loads posthog-js and its remote configuration from the site's PostHog host and sends the feature-flag request, with a random device ID and the visitor's IP address. Nothing is recorded or stored. Confirm with the site owner that this is allowed on the site.
+- It needs posthog-js 1.445.2 or later, which holds exposures read while capturing is off and sends them on opt-in. It runs the version the PostHog host serves at the time, so re-test it after posthog-js releases and when exposures drop.
+- It copies the site's PostHog options. Update it when those change.
+- Use it only on the tested pages, never on checkout or order-confirmation pages, where the site's own tracking must stay in charge.
+
+Without the example, still give the package's script tag the consent tool's ignore attribute (Cookiebot: `data-cookieconsent="ignore"`); otherwise the tool delays it like any other script.
+
 ## Current boundaries
 
 - Variants apply once. The package does not observe later SPA mutations, revert changes, or clean up effects.
@@ -244,7 +268,7 @@ The package does not inject a global anti-flicker snippet because a generic page
 
 The distributed JavaScript targets modern evergreen browsers and uses standard browser APIs including `Promise`, `URLSearchParams`, and `querySelectorAll`.
 
-There is no runtime dependency on `posthog-js`. Compatibility is structural: the client must expose `__loaded`, `onFeatureFlags()`, and `getFeatureFlag()`. The assignment summary also reads `featureFlags.getFeatureFlagDetails()`, `get_property()`, and `get_distinct_id()` when they exist. CI tests the current release against `posthog-js` 1.433.9 in Chromium.
+There is no runtime dependency on `posthog-js`. Compatibility is structural: the client must expose `__loaded`, `onFeatureFlags()`, and `getFeatureFlag()`. The assignment summary also reads `featureFlags.getFeatureFlagDetails()`, `get_property()`, and `get_distinct_id()` when they exist. CI tests the current release against `posthog-js` 1.447.12 in Chromium.
 
 The project follows Semantic Versioning. Before `1.0.0`, breaking public-API changes may ship in a minor release; they will be called out in the changelog. The internal experiment class is not part of the public contract.
 

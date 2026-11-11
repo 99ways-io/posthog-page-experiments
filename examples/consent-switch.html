@@ -1,0 +1,188 @@
+<!-- Page experiment with a consent switch, for sites whose consent tool holds PostHog back until consent.
+     Place it inside <body>, as early as possible and before the elements it changes. Fill in SETTINGS only.
+     Never use it on checkout or order-confirmation pages. Remove the whole block to stop.
+     Add ?experiment-debug to the page URL to see its step log in the browser console. -->
+<script data-cookieconsent="ignore" data-cfasync="false" nowprocket defer
+  src="https://cdn.jsdelivr.net/npm/@99ways/posthog-page-experiments@0.2.0/dist/posthog-page-experiments.min.js"
+  integrity="sha384-hos59rC7C92KgHf41pQ8zRAqCoVCm1ZV01eNigajc4TeIiZ/i022SdoCorUhzPXf"
+  crossorigin="anonymous"></script>
+<script data-cookieconsent="ignore" data-cfasync="false" nowprocket>
+  (function () {
+    // ==================== SETTINGS ====================
+
+    var FLAG = 'YOUR-FLAG-KEY';
+
+    // 'unassigned' (no answer from PostHog in time) and 'control' leave the page as it is.
+    var VARIANTS = {
+      unassigned: [],
+      control: [],
+      test: [
+        { selector: '[data-hero-title]', updates: { innerText: 'A clearer reason to choose the product' } }
+      ]
+    };
+
+    // The site's own PostHog loader tag, copied from the page source. If its file or version differs,
+    // the site's setup has changed: the switch steps aside and the page behaves as without it.
+    // Values for the PostHog for WordPress plugin (posthog-integration):
+    var SITE_POSTHOG_TAG_ID = 'phi-load-js-js';
+    var SITE_POSTHOG_FILE = 'posthog-integration/assets/frontend/js/load.js?ver=PLUGIN-FILE-VERSION';
+
+    // Statistics consent. Cookiebot: the CookieConsent cookie is '-1' (no consent required)
+    // or lists the accepted categories.
+    function hasConsent() {
+      var m = document.cookie.match(/(?:^|;\s*)CookieConsent=([^;]*)/);
+      var v = '';
+      try { v = m ? decodeURIComponent(m[1]) : ''; } catch (e) { return false; }
+      return v === '-1' || /statistics:\s*true/.test(v);
+    }
+
+    // Calls back when the visitor accepts or declines. Cookiebot fires these events on window.
+    // The consent cookie is also checked every second, which catches consent given in another tab.
+    function onConsentChange(callback) {
+      window.addEventListener('CookiebotOnAccept', callback);
+      window.addEventListener('CookiebotOnDecline', callback);
+    }
+
+    // The site's PostHog project key, host and posthog-js options, exactly as its own setup uses them.
+    // PostHog for WordPress plugin: the inline script phi-load-js-js-extra defines phiConfig. A consent tool
+    // that blocks this script still leaves its text in the page, so the settings are read from that text.
+    function siteSettings() {
+      var cfg = window.phiConfig;
+      if (!cfg) {
+        var el = document.getElementById('phi-load-js-js-extra');
+        var m = el && el.textContent.match(/phiConfig\s*=\s*(\{[\s\S]*\})\s*;/);
+        if (!m) return null;
+        try { cfg = JSON.parse(m[1]); } catch (e) { return null; }
+      }
+      return {
+        apiKey: cfg.apiKey,
+        skip: cfg.doNotTrackAdmins && cfg.isAdmin ? 'the site does not track this administrator' : '',
+        options: { // as in the plugin's load.js
+          api_host: cfg.apiHost,
+          autocapture: '1' === cfg.autocaptureEvents,
+          capture_pageview: '1' === cfg.capturePageview,
+          capture_pageleave: '1' === cfg.capturePageleave,
+          capture_dead_clicks: '1' === cfg.captureDeadClicks,
+          anonymize_user_data: '1' === cfg.anonymizeUserData,
+          person_profiles: 'always'
+        }
+      };
+    }
+
+    // Visitors left to the site's own PostHog setup (WordPress: logged-in users).
+    function leaveToSite() {
+      return document.body.classList.contains('logged-in') ? 'the visitor is logged in' : '';
+    }
+
+    // ==================== END OF SETTINGS ====================
+
+    var DEBUG = /[?&]experiment-debug/.test(location.search);
+    var t0 = Date.now();
+    function log(message) {
+      if (DEBUG) console.log('[Consent switch] +' + (Date.now() - t0) + ' ms: ' + message);
+    }
+
+    // Job 1: start posthog-js at once, switched off until consent. It still requests flags,
+    // but records and stores nothing; on consent it sends the page view and the held exposure.
+    var waits = 0;
+    function consentSwitch() {
+      if (window.posthog) return log('posthog-js is already on the page: nothing to do');
+      var s = siteSettings();
+      var tag = document.getElementById(SITE_POSTHOG_TAG_ID);
+      if (!s || !tag || !document.body) {
+        if (waits < 200) { waits += 1; setTimeout(guarded, 50); return; }
+        return log('skipped: the site\'s PostHog settings did not appear within 10 s');
+      }
+      var leave = leaveToSite();
+      if (leave) return log(leave + ': PostHog is left to the site');
+      if (!s.apiKey || !s.options.api_host) return log('skipped: no project key or host in the site\'s settings');
+      if (s.skip) return log('skipped: ' + s.skip);
+      var src = String(tag.getAttribute('src'));
+      var at = src.indexOf(SITE_POSTHOG_FILE);
+      var after = src.charAt(at + SITE_POSTHOG_FILE.length);
+      if (at === -1 || (after !== '' && after !== '&')) return log('skipped: the site\'s PostHog file changed (' + src + ')');
+
+      // PostHog's standard loader, plus data-cookieconsent="ignore" on the file it adds.
+      !function(t,e){var o,n,p,r;e.__SV||(window.posthog && window.posthog.__loaded)||(window.posthog=e,e._i=[],e.init=function(i,s,a){function g(t,e){var o=e.split(".");2==o.length&&(t=t[o[0]],e=o[1]),t[e]=function(){t.push([e].concat(Array.prototype.slice.call(arguments,0)))}}(p=t.createElement("script")).type="text/javascript",p.crossOrigin="anonymous",p.async=!0,p.setAttribute("data-cookieconsent","ignore"),p.src=s.api_host.replace(".i.posthog.com","-assets.i.posthog.com")+"/static/array.js",(r=t.getElementsByTagName("script")[0]).parentNode.insertBefore(p,r);var u=e;for(void 0!==a?u=e[a]=[]:a="posthog",u.people=u.people||[],u.toString=function(t){var e="posthog";return"posthog"!==a&&(e+="."+a),t||(e+=" (stub)"),e},u.people.toString=function(){return u.toString(1)+".people (stub)"},o="init yi Ar jr mi Or Mr capture Li calculateEventProperties Nr register register_once register_for_session unregister unregister_for_session Br getFeatureFlag getFeatureFlagPayload isFeatureEnabled reloadFeatureFlags updateEarlyAccessFeatureEnrollment getEarlyAccessFeatures on onFeatureFlags onSurveysLoaded onSessionId getSurveys getActiveMatchingSurveys renderSurvey displaySurvey canRenderSurvey canRenderSurveyAsync identify setPersonProperties group resetGroups setPersonPropertiesForFlags resetPersonPropertiesForFlags setGroupPropertiesForFlags resetGroupPropertiesForFlags reset get_distinct_id getGroups get_session_id get_session_replay_url alias set_config startSessionRecording stopSessionRecording sessionRecordingStarted captureException loadToolbar get_property getSessionProperty zr Lr createPersonProfile Hr Rr qr opt_in_capturing opt_out_capturing has_opted_in_capturing has_opted_out_capturing get_explicit_consent_status is_capturing clear_opt_in_out_capturing Dr debug L Ur getPageViewId captureTraceFeedback captureTraceMetric Pr".split(" "),n=0;n<o.length;n++)g(u,o[n]);e._i.push([i,s,a])},e.__SV=1)}(document,window.posthog||[]);
+
+      // The consent tool decides, not an opt-in or opt-out posthog-js stored on an earlier page view.
+      try { localStorage.removeItem('__ph_opt_in_out_' + s.apiKey); } catch (e) {}
+      var consent = hasConsent();
+      if (!consent) forgetVisitor(s.apiKey);
+      var options = {};
+      for (var k in s.options) options[k] = s.options[k];
+      options.opt_out_capturing_by_default = !consent;
+      options.opt_out_persistence_by_default = true; // while opted out, store nothing
+      window.posthog.init(s.apiKey, options);
+      watchPostHog();
+      log(consent ? 'consent already given: posthog-js started normally' : 'no consent yet: posthog-js started switched off (no events, nothing stored)');
+
+      // Consent given or withdrawn while the page is open.
+      function update() {
+        var now = hasConsent();
+        if (now === consent) return;
+        consent = now;
+        if (now) window.posthog.opt_in_capturing({ captureEventName: false });
+        else { window.posthog.opt_out_capturing(); forgetVisitor(s.apiKey); }
+        log(now ? 'consent given: posthog-js switched on' : 'consent withdrawn: posthog-js switched off');
+      }
+      setInterval(update, 1000);
+      onConsentChange(update);
+    }
+
+    // Without consent, posthog-js may neither read nor keep a visitor ID stored on an earlier page view.
+    function forgetVisitor(apiKey) {
+      var prefix = 'ph_' + apiKey;
+      var host = location.hostname.split('.');
+      document.cookie = prefix + '_posthog=; Max-Age=0; path=/';
+      for (var i = 0; i < host.length - 1; i++) {
+        document.cookie = prefix + '_posthog=; Max-Age=0; path=/; domain=.' + host.slice(i).join('.');
+      }
+      try {
+        [localStorage, sessionStorage].forEach(function (store) {
+          Object.keys(store).forEach(function (key) { if (key.indexOf(prefix) === 0) store.removeItem(key); });
+        });
+      } catch (e) {}
+    }
+
+    // Step log: PostHog's answer and the events posthog-js sends.
+    function watchPostHog() {
+      if (!DEBUG) return;
+      var polls = 0;
+      (function poll() {
+        var ph = window.posthog;
+        if (!ph || ph.__loaded !== true) {
+          if (polls < 600) { polls += 1; setTimeout(poll, 50); } else log('posthog-js did not load within 30 s');
+          return;
+        }
+        log('posthog-js loaded, visitor ID ' + ph.get_distinct_id());
+        ph.onFeatureFlags(function () {
+          log('PostHog answered: variant ' + JSON.stringify(ph.getFeatureFlag(FLAG, { send_event: false })));
+        });
+        ph.on('eventCaptured', function (event) {
+          var p = event.properties || {};
+          if (event.event === '$pageview') log('sent the page view, visitor ID ' + p.distinct_id);
+          if (event.event === '$feature_flag_called' && p.$feature_flag === FLAG) log('sent the exposure: variant ' + JSON.stringify(p.$feature_flag_response) + ', visitor ID ' + p.distinct_id);
+        });
+      })();
+    }
+
+    function guarded() {
+      try { consentSwitch(); } catch (e) { console.warn('[Consent switch] failed', e); }
+    }
+
+    // Job 2: run the experiment once the page has been parsed and the runner has loaded. This polls instead of
+    // listening for DOMContentLoaded, because auto-blocking consent tools delay those listeners.
+    var startWaits = 0;
+    function start() {
+      if (document.readyState !== 'loading' && typeof window.runExperiment === 'function') {
+        return window.runExperiment(FLAG, { defaultVariant: 'unassigned', variants: VARIANTS });
+      }
+      if (startWaits < 1500) { startWaits += 1; return setTimeout(start, 20); }
+      console.warn('[Consent switch] the runner did not load; the page is left as it is');
+    }
+
+    guarded();
+    start();
+  })();
+</script>
