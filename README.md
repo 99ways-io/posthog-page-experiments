@@ -232,6 +232,26 @@ For visible above-the-fold changes:
 
 The package does not inject a global anti-flicker snippet because a generic page-hiding strategy can damage Core Web Vitals and trap content when scripts fail.
 
+## Consent tools that hold PostHog back
+
+When a consent tool keeps PostHog off the page until consent, the package waits `featureFlagTimeoutMs`, applies the default variant and records nothing. [`examples/consent-switch.html`](./examples/consent-switch.html) fixes this from inside the page. Use it when:
+
+- the consent tool blocks scripts automatically (for example Cookiebot auto-blocking), or a plugin or tag manager loads PostHog only after consent;
+- consent often comes late, for example on scroll or on a second page view;
+- far fewer visitors are exposed than view the page, or many assignments come `from fallback`;
+- the site's PostHog and consent setup must stay unchanged.
+
+The example starts posthog-js at once with the site's own settings, opted out of capturing and persistence until consent. PostHog assigns the variant at page load. On consent, posthog-js sends the page view and the exposure it held back, with the same device ID. Visitors who never consent are not recorded. Its tags carry the ignore attributes of Cookiebot, WP Rocket and Cloudflare Rocket Loader, and it starts the experiment without a `DOMContentLoaded` listener, which auto-blocking delays. The defaults fit the PostHog for WordPress plugin with Cookiebot; for other setups, change its SETTINGS section.
+
+Before you use it:
+
+- Before consent, posthog-js sends the feature-flag request, with a random device ID and the visitor's IP address. Confirm with the site owner that this is allowed on the site.
+- It needs posthog-js 1.445.2 or later. Earlier versions drop exposures read while capturing is off. Re-test after posthog-js updates.
+- It copies the site's PostHog options. Update it when those change.
+- Never use it on checkout or order-confirmation pages.
+
+Without the example, still give the package's script tag the consent tool's ignore attribute (Cookiebot: `data-cookieconsent="ignore"`); otherwise the tool delays it like any other script.
+
 ## Current boundaries
 
 - Variants apply once. The package does not observe later SPA mutations, revert changes, or clean up effects.
@@ -244,7 +264,7 @@ The package does not inject a global anti-flicker snippet because a generic page
 
 The distributed JavaScript targets modern evergreen browsers and uses standard browser APIs including `Promise`, `URLSearchParams`, and `querySelectorAll`.
 
-There is no runtime dependency on `posthog-js`. Compatibility is structural: the client must expose `__loaded`, `onFeatureFlags()`, and `getFeatureFlag()`. The assignment summary also reads `featureFlags.getFeatureFlagDetails()`, `get_property()`, and `get_distinct_id()` when they exist. CI tests the current release against `posthog-js` 1.433.9 in Chromium.
+There is no runtime dependency on `posthog-js`. Compatibility is structural: the client must expose `__loaded`, `onFeatureFlags()`, and `getFeatureFlag()`. The assignment summary also reads `featureFlags.getFeatureFlagDetails()`, `get_property()`, and `get_distinct_id()` when they exist. CI tests the current release against `posthog-js` 1.447.12 in Chromium.
 
 The project follows Semantic Versioning. Before `1.0.0`, breaking public-API changes may ship in a minor release; they will be called out in the changelog. The internal experiment class is not part of the public contract.
 
