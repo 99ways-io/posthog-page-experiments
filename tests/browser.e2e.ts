@@ -75,3 +75,32 @@ test('the shipped browser bundle supports URL QA without PostHog', async ({ page
   expect(result).toBe('test')
   await expect(page.locator('.offer')).toHaveText('QA override works')
 })
+
+test('the short form hides the element, changes its text, and shows it again', async ({ page }) => {
+  const runner = (await import('node:fs')).readFileSync(experimentBundle, 'utf8')
+  await page.route('https://example.test/**', async (route) => {
+    await route.fulfill({
+      contentType: 'text/html',
+      body: `<!doctype html><html><head><script>${runner}</script></head><body>
+        <h1 class="hero-title">Original headline</h1>
+        <script>
+          window.visibilityAtCall = null
+          window.result = runExperiment('short-form-test', {
+            selector: '.hero-title',
+            hideUntilReady: true,
+            maxPageAgeMs: 10000,
+            variants: { control: null, test_group_1: 'New headline' },
+          })
+          window.visibilityAtCall = getComputedStyle(document.querySelector('.hero-title')).visibility
+        </script>
+      </body></html>`,
+    })
+  })
+  await page.goto('https://example.test/?short-form-test=test_group_1')
+
+  expect(await page.evaluate(() => (window as unknown as { visibilityAtCall: string }).visibilityAtCall)).toBe('hidden')
+  expect(await page.evaluate(() => (window as unknown as { result: Promise<string> }).result)).toBe('test_group_1')
+  await expect(page.locator('.hero-title')).toHaveText('New headline')
+  await expect(page.locator('.hero-title')).toBeVisible()
+  expect(await page.evaluate(() => document.querySelectorAll('style').length)).toBe(0)
+})

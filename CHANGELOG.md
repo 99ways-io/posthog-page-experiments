@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented here. The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- A short form for one-element tests: `selector` names the element, and a variant can be a text that replaces its text, or `null` for no change.
+- `hideUntilReady` hides `selector` from the call until a variant is applied or the default is shown, with `hideTimeoutMs` (default `featureFlagTimeoutMs + 1000`) as the longest hiding time and a CSS fallback that shows the element even if the script stops. A flag that answers after the element was shown is not read, so the visitor is not counted.
+- `maxPageAgeMs` counts a visitor only when the page's HTML started arriving no more than that long before the eligibility check; a hidden element is shown as soon as a still-loading page passes this age.
+- A visitor whose page has no element for `selector` is not counted.
+
+### Changed
+
+- The runner also checks `document.readyState` on a short interval while it waits for the page, so consent tools that hold back `DOMContentLoaded` listeners can no longer stall it.
+
 ## [0.2.0] - 2026-10-14
 
 ### Added

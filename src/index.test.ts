@@ -2,9 +2,25 @@ import { afterEach, describe, expect, spyOn, test } from 'bun:test'
 import { runExperiment } from './index'
 import type { PostHogClient } from './index'
 
+class FakeStyle {
+  textContent = ''
+  removed = false
+  constructor(private readonly owner: FakeDocument) {}
+  remove(): void {
+    this.removed = true
+    this.owner.styles = this.owner.styles.filter((style) => style !== this)
+  }
+}
+
 class FakeDocument extends EventTarget {
   readyState: DocumentReadyState = 'loading'
   readonly elements = new Map<string, HTMLElement[]>()
+  styles: FakeStyle[] = []
+  readonly head = { appendChild: (style: FakeStyle) => { this.styles.push(style) } }
+
+  createElement(): FakeStyle {
+    return new FakeStyle(this)
+  }
 
   querySelectorAll<T extends Element>(selector: string): NodeListOf<T> {
     const elements = this.elements.get(selector) ?? []
@@ -80,16 +96,30 @@ async function waitForSubscription(featureFlags: ReturnType<typeof createPostHog
 const originalWindow = globalThis.window
 const originalDocument = globalThis.document
 
-function installBrowser(document: FakeDocument, search = '', posthog?: PostHogClient): void {
+function installBrowser(
+  document: FakeDocument,
+  search = '',
+  posthog?: PostHogClient,
+  performance?: { now: () => number, getEntriesByType: (type: string) => unknown[] },
+): void {
   Object.defineProperty(globalThis, 'document', {
     configurable: true,
     value: document,
   })
   Object.defineProperty(globalThis, 'window', {
     configurable: true,
-    value: { document, location: { search }, posthog },
+    value: { document, location: { search }, posthog, performance },
   })
 }
+
+function pagePerformance(now: number, responseStart: number) {
+  return {
+    now: () => now,
+    getEntriesByType: (type: string) => (type === 'navigation' ? [{ responseStart }] : []),
+  }
+}
+
+const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 afterEach(() => {
   Object.defineProperty(globalThis, 'window', {
@@ -504,6 +534,231 @@ describe('runExperiment', () => {
     }
   })
 
+  test('applies text variants to the selector and leaves null variants unchanged', async () => {
+    const document = new FakeDocument()
+    const { element } = createElement()
+    element.innerText = 'Original headline'
+    document.elements.set('.hero h1', [element])
+    const featureFlags = createPostHog('test_group_1')
+    installBrowser(document, '', featureFlags.posthog)
+
+    const result = runExperiment('text-test', {
+      selector: '.hero h1',
+      log: 'silent',
+      variants: { control: null, test_group_1: 'New headline' },
+    })
+    document.finishLoading()
+    await waitForSubscription(featureFlags)
+    featureFlags.emit()
+
+    expect(await result).toBe('test_group_1')
+    expect(element.innerText).toBe('New headline')
+
+    const controlDocument = new FakeDocument()
+    const control = createElement()
+    control.element.innerText = 'Original headline'
+    controlDocument.elements.set('.hero h1', [control.element])
+    const controlFlags = createPostHog('control')
+    installBrowser(controlDocument, '', controlFlags.posthog)
+    controlDocument.finishLoading()
+    const controlResult = runExperiment('text-test', {
+      selector: '.hero h1',
+      log: 'silent',
+      variants: { control: null, test_group_1: 'New headline' },
+    })
+    await waitForSubscription(controlFlags)
+    controlFlags.emit()
+    expect(await controlResult).toBe('control')
+    expect(control.element.innerText).toBe('Original headline')
+  })
+
+  test('does not count a visitor whose page has no element for the selector', async () => {
+    const document = new FakeDocument()
+    const featureFlags = createPostHog('test_group_1')
+    installBrowser(document, '', featureFlags.posthog)
+    const info = spyOn(console, 'info').mockImplementation(() => {})
+
+    try {
+      const result = runExperiment('missing-element-test', {
+        selector: '.hero h1',
+        variants: { control: null, test_group_1: 'New headline' },
+      })
+      document.finishLoading()
+
+      expect(await result).toBeNull()
+      expect(featureFlags.subscriptions()).toBe(0)
+      expect(featureFlags.featureFlagReads()).toBe(0)
+      expect(info.mock.calls[0]?.[1]).toMatchObject({
+        source: 'ineligible',
+        note: "No element matches '.hero h1', so the feature flag was not evaluated.",
+      })
+    } finally {
+      info.mockRestore()
+    }
+  })
+
+  test('does not count a visitor whose page took longer than maxPageAgeMs', async () => {
+    const slowDocument = new FakeDocument()
+    slowDocument.elements.set('.hero h1', [createElement().element])
+    const slowFlags = createPostHog('test_group_1')
+    installBrowser(slowDocument, '', slowFlags.posthog, pagePerformance(4_200, 500))
+    const info = spyOn(console, 'info').mockImplementation(() => {})
+
+    try {
+      const slow = runExperiment('page-age-test', {
+        selector: '.hero h1',
+        maxPageAgeMs: 3_500,
+        variants: { control: null, test_group_1: 'New headline' },
+      })
+      slowDocument.finishLoading()
+      expect(await slow).toBeNull()
+      expect(slowFlags.featureFlagReads()).toBe(0)
+      expect(info.mock.calls[0]?.[1]).toMatchObject({
+        source: 'ineligible',
+        note: 'The page took 3700ms, more than maxPageAgeMs (3500ms), so the feature flag was not evaluated.',
+      })
+    } finally {
+      info.mockRestore()
+    }
+
+    const fastDocument = new FakeDocument()
+    fastDocument.elements.set('.hero h1', [createElement().element])
+    const fastFlags = createPostHog('test_group_1')
+    installBrowser(fastDocument, '', fastFlags.posthog, pagePerformance(3_900, 500))
+    const fast = runExperiment('page-age-test', {
+      selector: '.hero h1',
+      maxPageAgeMs: 3_500,
+      log: 'silent',
+      variants: { control: null, test_group_1: 'New headline' },
+    })
+    fastDocument.finishLoading()
+    await waitForSubscription(fastFlags)
+    fastFlags.emit()
+    expect(await fast).toBe('test_group_1')
+  })
+
+  test('hides the selector from the call until the variant is applied', async () => {
+    const document = new FakeDocument()
+    const { element } = createElement()
+    document.elements.set('.hero h1', [element])
+    const featureFlags = createPostHog('test_group_1')
+    installBrowser(document, '', featureFlags.posthog)
+
+    const result = runExperiment('hide-test', {
+      selector: '.hero h1',
+      hideUntilReady: true,
+      log: 'silent',
+      variants: { control: null, test_group_1: 'New headline' },
+    })
+
+    expect(document.styles).toHaveLength(1)
+    expect(document.styles[0]?.textContent).toContain('.hero h1{visibility:hidden;')
+
+    document.finishLoading()
+    await waitForSubscription(featureFlags)
+    expect(document.styles).toHaveLength(1)
+    featureFlags.emit()
+
+    expect(await result).toBe('test_group_1')
+    expect(element.innerText).toBe('New headline')
+    expect(document.styles).toHaveLength(0)
+  })
+
+  test('shows the hidden selector again when the visitor is not counted', async () => {
+    const document = new FakeDocument()
+    const featureFlags = createPostHog('test_group_1')
+    installBrowser(document, '', featureFlags.posthog)
+
+    const result = runExperiment('hide-ineligible-test', {
+      selector: '.hero h1',
+      hideUntilReady: true,
+      log: 'silent',
+      variants: { control: null, test_group_1: 'New headline' },
+    })
+    expect(document.styles).toHaveLength(1)
+    document.finishLoading()
+
+    expect(await result).toBeNull()
+    expect(document.styles).toHaveLength(0)
+  })
+
+  test('shows the selector unchanged and reads no flag when PostHog answers after hideTimeoutMs', async () => {
+    const document = new FakeDocument()
+    const { element } = createElement()
+    element.innerText = 'Original headline'
+    document.elements.set('.hero h1', [element])
+    const featureFlags = createPostHog('test_group_1')
+    installBrowser(document, '', featureFlags.posthog)
+    const info = spyOn(console, 'info').mockImplementation(() => {})
+
+    try {
+      const result = runExperiment('hide-timeout-test', {
+        selector: '.hero h1',
+        hideUntilReady: true,
+        hideTimeoutMs: 20,
+        featureFlagTimeoutMs: 1_000,
+        variants: { control: null, test_group_1: 'New headline' },
+      })
+      document.finishLoading()
+      await waitForSubscription(featureFlags)
+      await wait(40)
+      expect(document.styles).toHaveLength(0)
+
+      featureFlags.emit()
+      expect(await result).toBe('control')
+      expect(element.innerText).toBe('Original headline')
+      expect(featureFlags.featureFlagReads()).toBe(0)
+      expect(info.mock.calls[0]?.[1]).toMatchObject({ source: 'fallback', variant: 'control' })
+      expect(String((info.mock.calls[0]?.[1] as { note?: string }).note)).toContain('shown after 20ms')
+    } finally {
+      info.mockRestore()
+    }
+  })
+
+  test('shows the hidden selector as soon as a still-loading page passes maxPageAgeMs', async () => {
+    const document = new FakeDocument()
+    document.elements.set('.hero h1', [createElement().element])
+    const featureFlags = createPostHog('test_group_1')
+    let now = 1_000
+    installBrowser(document, '', featureFlags.posthog, {
+      now: () => now,
+      getEntriesByType: () => [{ responseStart: 0 }],
+    })
+
+    const result = runExperiment('hide-page-age-test', {
+      selector: '.hero h1',
+      hideUntilReady: true,
+      maxPageAgeMs: 1_030,
+      log: 'silent',
+      variants: { control: null, test_group_1: 'New headline' },
+    })
+    expect(document.styles).toHaveLength(1)
+    await wait(60)
+    expect(document.styles).toHaveLength(0)
+
+    now = 2_000
+    document.finishLoading()
+    expect(await result).toBeNull()
+    expect(featureFlags.featureFlagReads()).toBe(0)
+  })
+
+  test('starts when the page is ready even if DOMContentLoaded never reaches listeners', async () => {
+    const document = new FakeDocument()
+    const featureFlags = createPostHog('test')
+    installBrowser(document, '', featureFlags.posthog)
+
+    const result = runExperiment('ready-state-test', {
+      log: 'silent',
+      variants: { control: [], test: [] },
+    })
+    document.readyState = 'interactive'
+
+    await wait(60)
+    expect(featureFlags.subscriptions()).toBe(1)
+    featureFlags.emit()
+    expect(await result).toBe('test')
+  })
+
   test('returns null when called outside a browser', async () => {
     Object.defineProperty(globalThis, 'window', { configurable: true, value: undefined })
     Object.defineProperty(globalThis, 'document', { configurable: true, value: undefined })
@@ -526,5 +781,26 @@ describe('runExperiment', () => {
       featureFlagTimeoutMs: -1,
       variants: { control: [] },
     })).toThrow('featureFlagTimeoutMs must be a finite number greater than or equal to 0.')
+    expect(() => runExperiment('text-without-selector', {
+      variants: { control: null, test: 'New headline' },
+    })).toThrow('selector is required when a variant is a text.')
+    expect(() => runExperiment('hide-without-selector', {
+      hideUntilReady: true,
+      variants: { control: [] },
+    })).toThrow('selector is required when hideUntilReady is true.')
+    expect(() => runExperiment('empty-selector', {
+      selector: ' ',
+      variants: { control: [] },
+    })).toThrow('selector must be a non-empty string.')
+    expect(() => runExperiment('invalid-page-age', {
+      maxPageAgeMs: Number.NaN,
+      variants: { control: [] },
+    })).toThrow('maxPageAgeMs must be a finite number greater than or equal to 0.')
+    expect(() => runExperiment('invalid-hide-timeout', {
+      selector: '.hero h1',
+      hideUntilReady: true,
+      hideTimeoutMs: -5,
+      variants: { control: [] },
+    })).toThrow('hideTimeoutMs must be a finite number greater than or equal to 0.')
   })
 })

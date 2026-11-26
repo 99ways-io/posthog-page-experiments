@@ -166,19 +166,25 @@ Use raw PostHog feature-flag calls when the flag is already part of your applica
 Returns `Promise<string | null>`:
 
 - the applied variant name when the visitor is eligible;
-- `null` when browser globals are unavailable or `isEligible` returns false.
+- `null` when browser globals are unavailable or the visitor is not counted: `isEligible` returns false, no element matches `selector`, the page is older than `maxPageAgeMs`, or the hidden element was shown before a variant could be chosen.
 
 The promise rejects if eligibility or a variant handler throws.
 
 | Option | Type | Default | Purpose |
 | --- | --- | --- | --- |
-| `variants` | `Record<string, VariantHandler>` | Required | Complete map of supported variants. Must include the default. |
+| `variants` | `Record<string, VariantHandler \| string \| null>` | Required | Complete map of supported variants. Must include the default. A text replaces the text of `selector`; `null` changes nothing. |
 | `defaultVariant` | `string` | `control` | Used for unavailable, disabled, empty, timed-out, or unknown flag values. |
 | `isEligible` | `() => boolean \| PromiseLike<boolean>` | `() => true` | Runs before the flag is evaluated. |
 | `posthog` | `PostHogClient` | `window.posthog` | Explicit initialized client for module use. |
 | `featureFlagTimeoutMs` | `number` | `4000` | Maximum wait for PostHog and its first feature-flag notification. |
 | `log` | `'summary' \| 'debug' \| 'silent'` | `'summary'` | Console output: one assignment summary, plus step-by-step diagnostics with `debug`, or nothing. |
 | `debug` | `boolean` | `false` | Shorthand for `log: 'debug'`. Ignored when `log` is set. |
+| `selector` | `string` | — | The element the experiment changes. Text variants replace its text, `hideUntilReady` hides it, and a visitor whose page has no match is not counted. |
+| `hideUntilReady` | `boolean` | `false` | Hides `selector` from the call until a variant is applied or the default is shown. Requires `selector`. |
+| `hideTimeoutMs` | `number` | `featureFlagTimeoutMs + 1000` | The longest `selector` stays hidden, from the call. A variant not ready by then is not shown, the flag is not read, and the visitor is not counted. |
+| `maxPageAgeMs` | `number` | — | Counts the visitor only when the page's HTML started arriving no more than this long before the eligibility check. A hidden element is shown as soon as a still-loading page passes this age. |
+
+All four settings are optional; without them the runner behaves as before.
 
 Boolean flags map `true` to `test` and `false` to the default variant. String-valued flags map directly to the matching configured variant.
 
@@ -219,6 +225,29 @@ runExperiment('offer-card', {
 - `innerHTML` is assigned without sanitization. Only use trusted markup.
 - Element callbacks and custom functions run synchronously in array order. Returned promises are not awaited.
 
+### Short form for one element
+
+When a test changes one element's text, name the element once and list the texts:
+
+```html
+<script>/* the runner, pasted inline or loaded before this script */</script>
+<script>
+  runExperiment('homepage-headline', {
+    selector: '.hero h1',
+    hideUntilReady: true,
+    maxPageAgeMs: 3500,
+    featureFlagTimeoutMs: 3000,
+    variants: {
+      control: null,
+      test_group_1: 'First new headline',
+      test_group_2: 'Second new headline',
+    },
+  })
+</script>
+```
+
+Place both scripts **before** the element in the page, so the element is hidden before the browser can draw it. A script placed after the element can only hide it once it may already be on screen.
+
 ## Flicker and loading strategy
 
 This package waits for DOM readiness, eligibility, and the PostHog flag before changing the page. A client-rendered visual treatment can therefore flash the original experience.
@@ -230,12 +259,12 @@ For visible above-the-fold changes:
 3. hide only the specific experiment target with a short, fail-safe timeout when a flash would be worse than a brief concealment;
 4. prefer server-side or application-rendered variants when flicker-free rendering is essential.
 
-The package does not inject a global anti-flicker snippet because a generic page-hiding strategy can damage Core Web Vitals and trap content when scripts fail.
+The package never hides the whole page. `hideUntilReady` hides only the named element, from the moment `runExperiment` is called, and always shows it again: after the variant is applied, when the visitor is not counted, after `hideTimeoutMs`, or, through a CSS animation, even if the script stops running.
 
 ## Current boundaries
 
 - Variants apply once. The package does not observe later SPA mutations, revert changes, or clean up effects.
-- Selectors that match nothing are skipped. Use `isEligible` when a missing target means the visitor must not enter the experiment.
+- Selectors that match nothing are skipped. Set `selector`, or use `isEligible`, when a missing target means the visitor must not enter the experiment.
 - Handlers are synchronous from the package's perspective; asynchronous work inside them is not awaited.
 - A thrown handler error stops the remaining steps and rejects the returned promise.
 - The package runs in browsers. Importing it during server rendering is safe, but calling it without browser globals resolves to `null`.
