@@ -181,10 +181,10 @@ The promise rejects if eligibility or a variant handler throws.
 | `debug` | `boolean` | `false` | Shorthand for `log: 'debug'`. Ignored when `log` is set. |
 | `selector` | `string` | — | The element the experiment changes. Text variants replace its text, `hideUntilReady` hides it, and a visitor whose page has no match is not counted. |
 | `hideUntilReady` | `boolean` | `false` | Hides `selector` from the call until a variant is applied or the default is shown. Requires `selector`. |
-| `hideTimeoutMs` | `number` | `featureFlagTimeoutMs + 1000` | The longest `selector` stays hidden, from the call. A variant not ready by then is not shown, the flag is not read, and the visitor is not counted. |
-| `maxPageAgeMs` | `number` | — | Counts the visitor only when the page's HTML started arriving no more than this long before the eligibility check. A hidden element is shown as soon as a still-loading page passes this age. |
+| `hideTimeoutMs` | `number` | `featureFlagTimeoutMs + maxPageAgeMs` (`+ 1000` without `maxPageAgeMs`) | The longest `selector` stays hidden, from the call. A variant not ready by then is not shown, the flag is not read, and the visitor is not counted. The default keeps every visitor who can still be counted hidden until their variant is applied. Requires `hideUntilReady`. |
+| `maxPageAgeMs` | `number` | — | Counts the visitor only when the page's HTML started arriving no more than this long before the eligibility check. A page already older when `runExperiment` is called is not hidden; a hidden element is shown as soon as a still-loading page passes this age. A prerendered page counts from the moment the visitor opens it. |
 
-All four settings are optional; without them the runner behaves as before.
+All four settings are optional; without them the runner behaves as before. A URL override (`?<flag>=<variant>`) ignores `maxPageAgeMs` and the hiding time, so a variant can be checked on a slow device. Wrong settings, such as an invalid CSS selector, an empty text variant or `hideTimeoutMs` without `hideUntilReady`, throw an error before anything is hidden.
 
 Boolean flags map `true` to `test` and `false` to the default variant. String-valued flags map directly to the matching configured variant.
 
@@ -246,7 +246,7 @@ When a test changes one element's text, name the element once and list the texts
 </script>
 ```
 
-Place both scripts **before** the element in the page, so the element is hidden before the browser can draw it. A script placed after the element can only hide it once it may already be on screen.
+Place both scripts **before** the element in the page, so the element is hidden before the browser can draw it. A script placed after the element can only hide it once it may already be on screen; with `log: 'debug'` the runner warns when that happens.
 
 ## Flicker and loading strategy
 
@@ -259,7 +259,7 @@ For visible above-the-fold changes:
 3. hide only the specific experiment target with a short, fail-safe timeout when a flash would be worse than a brief concealment;
 4. prefer server-side or application-rendered variants when flicker-free rendering is essential.
 
-The package never hides the whole page. `hideUntilReady` hides only the named element, from the moment `runExperiment` is called, and always shows it again: after the variant is applied, when the visitor is not counted, after `hideTimeoutMs`, or, through a CSS animation, even if the script stops running.
+The package never hides the whole page. `hideUntilReady` hides only the named element, from the moment `runExperiment` is called, and always shows it again: after the variant is applied, when the visitor is not counted, after `hideTimeoutMs`, or, through a CSS animation 500 ms later, even if the script stops running.
 
 ## Current boundaries
 

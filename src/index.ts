@@ -85,12 +85,15 @@ export interface ExperimentOptions {
   hideUntilReady?: boolean
   /**
    * The longest `selector` stays hidden, counted from the call. A variant that is not ready
-   * by then is not shown and the visitor is not counted. Defaults to `featureFlagTimeoutMs + 1000`.
+   * by then is not shown and the visitor is not counted. Defaults to `featureFlagTimeoutMs`
+   * plus `maxPageAgeMs` (or plus 1000 without `maxPageAgeMs`), so every visitor who can still
+   * be counted keeps the element hidden until their variant is applied. Needs `hideUntilReady`.
    */
   hideTimeoutMs?: number
   /**
    * Count the visitor only when the page's HTML started arriving no more than this many
    * milliseconds before the eligibility check. Slower visitors see the default and are not counted.
+   * A URL override (`?<flag>=<variant>`) ignores this limit and the hiding time, for QA on slow devices.
    */
   maxPageAgeMs?: number
 }
@@ -101,6 +104,9 @@ const DEFAULT_FEATURE_FLAG_TIMEOUT_MS = 4_000
 const POSTHOG_POLL_INTERVAL_MS = 50
 const DOM_READY_POLL_INTERVAL_MS = 20
 const HIDE_TIMEOUT_MARGIN_MS = 1_000
+// The CSS fail-safe shows the element this long after hideTimeoutMs, so the script's own
+// timer always runs first and no flag is read once the element can be visible.
+const CSS_FAILSAFE_MARGIN_MS = 500
 const DEBUG_QUERY_PARAM = 'experiment-debug'
 
 interface Resolution {
@@ -128,6 +134,7 @@ class Experiment {
   private pageAgeTimer: ReturnType<typeof setTimeout> | undefined
   private shownBeforeReady = false
   private pageTooSlow = false
+  private onShownBeforeReady: (() => void) | undefined
 
   constructor(
     private readonly featureFlag: string,
@@ -145,8 +152,9 @@ class Experiment {
     this.featureFlagTimeoutMs = options.featureFlagTimeoutMs ?? DEFAULT_FEATURE_FLAG_TIMEOUT_MS
     this.selector = options.selector
     this.hideUntilReady = options.hideUntilReady ?? false
-    this.hideTimeoutMs = options.hideTimeoutMs ?? this.featureFlagTimeoutMs + HIDE_TIMEOUT_MARGIN_MS
     this.maxPageAgeMs = options.maxPageAgeMs
+    this.hideTimeoutMs = options.hideTimeoutMs
+      ?? this.featureFlagTimeoutMs + (this.maxPageAgeMs ?? HIDE_TIMEOUT_MARGIN_MS)
 
     if (!['silent', 'summary', 'debug'].includes(this.logLevel)) {
       throw new TypeError("log must be 'silent', 'summary', or 'debug'.")
@@ -168,6 +176,23 @@ class Experiment {
       throw new TypeError('selector must be a non-empty string.')
     }
 
+    if (this.selector !== undefined && typeof document !== 'undefined') {
+      try {
+        document.querySelectorAll(this.selector)
+      } catch {
+        throw new TypeError(`selector '${this.selector}' is not a valid CSS selector.`)
+      }
+    }
+
+    this.variants.forEach((variant, name) => {
+      if (typeof variant === 'string' && !variant.trim()) {
+        throw new TypeError(`Variant '${name}' is an empty text. Use null to leave the page unchanged.`)
+      }
+      if (variant !== null && typeof variant !== 'string' && typeof variant !== 'function' && !Array.isArray(variant)) {
+        throw new TypeError(`Variant '${name}' must be a function, an array of steps, a text, or null.`)
+      }
+    })
+
     const hasTextVariant = [...this.variants.values()].some((variant) => typeof variant === 'string')
     if (hasTextVariant && !this.selector) {
       throw new TypeError('selector is required when a variant is a text.')
@@ -177,18 +202,26 @@ class Experiment {
       throw new TypeError('selector is required when hideUntilReady is true.')
     }
 
-    if (!Number.isFinite(this.hideTimeoutMs) || this.hideTimeoutMs < 0) {
-      throw new RangeError('hideTimeoutMs must be a finite number greater than or equal to 0.')
+    if (options.hideTimeoutMs !== undefined && !this.hideUntilReady) {
+      throw new TypeError('hideTimeoutMs needs hideUntilReady: true.')
     }
 
     if (this.maxPageAgeMs !== undefined && (!Number.isFinite(this.maxPageAgeMs) || this.maxPageAgeMs < 0)) {
       throw new RangeError('maxPageAgeMs must be a finite number greater than or equal to 0.')
     }
+
+    if (!Number.isFinite(this.hideTimeoutMs) || this.hideTimeoutMs < 0) {
+      throw new RangeError('hideTimeoutMs must be a finite number greater than or equal to 0.')
+    }
   }
 
   run(): Promise<ExperimentResult> {
     if (!this.runPromise) {
-      if (typeof window !== 'undefined' && typeof document !== 'undefined') this.hide()
+      if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+        // A page that is already older than maxPageAgeMs is not counted, so it is not hidden either.
+        if (this.isPageTooOld()) this.pageTooSlow = true
+        else this.hide()
+      }
       const run = this.runOnce()
       this.runPromise = run.finally(() => this.reveal())
     }
@@ -234,11 +267,14 @@ class Experiment {
   private async checkEligibility(): Promise<string | null> {
     this.log('Checking eligibility before evaluating the feature flag.')
 
-    if (this.shownBeforeReady) {
+    // A URL override is for QA: the time limits do not apply to it.
+    const timed = !this.getVariantFromQueryParam()
+
+    if (timed && this.shownBeforeReady) {
       return `The element was shown after ${this.hideTimeoutMs}ms before a variant could be chosen, so the feature flag was not evaluated.`
     }
 
-    if (this.maxPageAgeMs !== undefined) {
+    if (timed && this.maxPageAgeMs !== undefined) {
       const pageAge = this.getPageAgeMs()
       if (this.pageTooSlow || pageAge > this.maxPageAgeMs) {
         return `The page took ${Math.round(pageAge)}ms, more than maxPageAgeMs (${this.maxPageAgeMs}ms), so the feature flag was not evaluated.`
@@ -257,24 +293,34 @@ class Experiment {
   }
 
   // Time since the page's HTML started arriving. Network and server time before that is not counted.
+  // A prerendered page counts from the moment the visitor opens it.
   private getPageAgeMs(): number {
     const performance = window.performance
     if (!performance || typeof performance.now !== 'function') return 0
+    if ((document as Document & { prerendering?: boolean }).prerendering === true) return 0
     const navigation = typeof performance.getEntriesByType === 'function'
-      ? performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming | undefined
+      ? performance.getEntriesByType('navigation')[0] as (PerformanceNavigationTiming & { activationStart?: number }) | undefined
       : undefined
-    const htmlArrived = navigation && navigation.responseStart > 0 ? navigation.responseStart : 0
+    const htmlArrived = Math.max(navigation?.responseStart || 0, navigation?.activationStart || 0)
     return performance.now() - htmlArrived
+  }
+
+  private isPageTooOld(): boolean {
+    return this.maxPageAgeMs !== undefined && !this.getVariantFromQueryParam() && this.getPageAgeMs() > this.maxPageAgeMs
   }
 
   private hide(): void {
     if (!this.hideUntilReady || !this.selector) return
 
     try {
+      if (document.querySelectorAll(this.selector).length > 0) {
+        this.warn(`'${this.selector}' already exists when hiding starts; call runExperiment() above it in the HTML so it is never painted first.`)
+      }
       const name = `ppe-reveal-${Math.random().toString(36).slice(2)}`
       const style = document.createElement('style')
-      // The animation shows the element after hideTimeoutMs even if this script stops running.
-      style.textContent = `${this.selector}{visibility:hidden;animation:${name} 0s linear ${this.hideTimeoutMs}ms forwards}`
+      // The animation shows the element shortly after hideTimeoutMs even if this script stops running.
+      const failsafeMs = Math.ceil(this.hideTimeoutMs) + CSS_FAILSAFE_MARGIN_MS
+      style.textContent = `${this.selector}{visibility:hidden;animation:${name} 0s linear ${failsafeMs}ms forwards}`
         + `@keyframes ${name}{to{visibility:visible}}`
       ;(document.head ?? document.documentElement).appendChild(style)
       this.hideStyle = style
@@ -282,10 +328,11 @@ class Experiment {
         this.shownBeforeReady = true
         this.warn(`No variant was ready within ${this.hideTimeoutMs}ms; showing '${this.selector}' unchanged.`)
         this.reveal()
+        this.onShownBeforeReady?.()
       }, this.hideTimeoutMs)
       // A page that passes maxPageAgeMs while still loading will not be counted: show it now
       // instead of keeping the element hidden until hideTimeoutMs.
-      if (this.maxPageAgeMs !== undefined) {
+      if (this.maxPageAgeMs !== undefined && !this.getVariantFromQueryParam()) {
         this.pageAgeTimer = setTimeout(() => {
           this.pageTooSlow = true
           this.reveal()
@@ -371,6 +418,7 @@ class Experiment {
       const cleanup = () => {
         if (pollTimer !== undefined) clearInterval(pollTimer)
         if (timeoutTimer !== undefined) clearTimeout(timeoutTimer)
+        this.onShownBeforeReady = undefined
         if (!removePostHogSubscription()) unsubscribeWhenAvailable = true
       }
 
@@ -395,6 +443,8 @@ class Experiment {
         try {
           this.log('PostHog is initialized; subscribing to feature flags.')
           const remove = posthog.onFeatureFlags(() => {
+            // A notification after the run has finished must not read the flag: reading sends an exposure.
+            if (settled) return
             if (this.shownBeforeReady) {
               finish({ value: this.defaultVariant, source: 'fallback', fallback: 'shown' })
               return
@@ -438,6 +488,8 @@ class Experiment {
         finish({ value: this.defaultVariant, source: 'fallback', fallback: 'shown' })
         return
       }
+      // Once the element has been shown unchanged, stop waiting: the flag will not be read.
+      this.onShownBeforeReady = () => finish({ value: this.defaultVariant, source: 'fallback', fallback: 'shown' })
 
       timeoutTimer = setTimeout(() => {
         this.warn(

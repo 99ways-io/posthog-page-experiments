@@ -14,6 +14,7 @@ class FakeStyle {
 
 class FakeDocument extends EventTarget {
   readyState: DocumentReadyState = 'loading'
+  prerendering = false
   readonly elements = new Map<string, HTMLElement[]>()
   styles: FakeStyle[] = []
   readonly head = { appendChild: (style: FakeStyle) => { this.styles.push(style) } }
@@ -23,6 +24,7 @@ class FakeDocument extends EventTarget {
   }
 
   querySelectorAll<T extends Element>(selector: string): NodeListOf<T> {
+    if (selector.includes('[[')) throw new SyntaxError(`'${selector}' is not a valid selector.`)
     const elements = this.elements.get(selector) ?? []
     return {
       length: elements.length,
@@ -802,5 +804,241 @@ describe('runExperiment', () => {
       hideTimeoutMs: -5,
       variants: { control: [] },
     })).toThrow('hideTimeoutMs must be a finite number greater than or equal to 0.')
+  })
+
+  test('hides for featureFlagTimeoutMs plus maxPageAgeMs by default, with the CSS fail-safe 500 ms later', async () => {
+    const document = new FakeDocument()
+    document.elements.set('.hero h1', [createElement().element])
+    const flags = createPostHog('control')
+    installBrowser(document, '', flags.posthog, pagePerformance(100, 0))
+
+    const withPageAge = runExperiment('default-hide-test', {
+      selector: '.hero h1',
+      hideUntilReady: true,
+      maxPageAgeMs: 3_500,
+      featureFlagTimeoutMs: 3_000,
+      log: 'silent',
+      variants: { control: null, test_group_1: 'New headline' },
+    })
+    expect(document.styles[0]?.textContent).toContain(' 0s linear 7000ms forwards')
+    document.finishLoading()
+    await waitForSubscription(flags)
+    flags.emit()
+    expect(await withPageAge).toBe('control')
+
+    const plainDocument = new FakeDocument()
+    plainDocument.elements.set('.hero h1', [createElement().element])
+    const plainFlags = createPostHog('control')
+    installBrowser(plainDocument, '', plainFlags.posthog)
+    const withoutPageAge = runExperiment('default-hide-test', {
+      selector: '.hero h1',
+      hideUntilReady: true,
+      featureFlagTimeoutMs: 3_000,
+      log: 'silent',
+      variants: { control: null },
+    })
+    expect(plainDocument.styles[0]?.textContent).toContain(' 0s linear 4500ms forwards')
+    plainDocument.finishLoading()
+    await waitForSubscription(plainFlags)
+    plainFlags.emit()
+    expect(await withoutPageAge).toBe('control')
+  })
+
+  test('counts a visitor whose flag arrives after featureFlagTimeoutMs + 1000 but within the default hiding time', async () => {
+    const document = new FakeDocument()
+    const { element } = createElement()
+    document.elements.set('.hero h1', [element])
+    const featureFlags = createPostHog('test_group_1')
+    installBrowser(document, '', featureFlags.posthog, pagePerformance(100, 0))
+
+    const result = runExperiment('late-but-counted-test', {
+      selector: '.hero h1',
+      hideUntilReady: true,
+      maxPageAgeMs: 3_500,
+      featureFlagTimeoutMs: 1_000,
+      log: 'silent',
+      variants: { control: null, test_group_1: 'New headline' },
+    })
+    // The page is ready after 1.5 s and PostHog answers 0.8 s later: 2.3 s after the call, past
+    // featureFlagTimeoutMs + 1000 (2 s) but within featureFlagTimeoutMs + maxPageAgeMs (4.5 s).
+    await wait(1_500)
+    document.finishLoading()
+    await waitForSubscription(featureFlags)
+    await wait(800)
+    expect(document.styles).toHaveLength(1)
+    featureFlags.emit()
+
+    expect(await result).toBe('test_group_1')
+    expect(element.innerText).toBe('New headline')
+    expect(featureFlags.featureFlagReads()).toBe(1)
+  })
+
+  test('never reads the flag on a PostHog notification after the run has finished', async () => {
+    const document = new FakeDocument()
+    document.readyState = 'interactive'
+    let callback: (() => void) | undefined
+    let reads = 0
+    const posthog: PostHogClient = {
+      __loaded: true,
+      getFeatureFlag: () => { reads += 1; return 'test' },
+      // An older client that cannot unsubscribe.
+      onFeatureFlags: (next) => { callback = next },
+    }
+    installBrowser(document, '', posthog)
+
+    const result = runExperiment('late-notification-test', {
+      featureFlagTimeoutMs: 20,
+      log: 'silent',
+      variants: { control: [], test: [] },
+    })
+    expect(await result).toBe('control')
+    callback?.()
+    expect(reads).toBe(0)
+  })
+
+  test('stops waiting for PostHog as soon as the element is shown unchanged', async () => {
+    const document = new FakeDocument()
+    document.elements.set('.hero h1', [createElement().element])
+    const featureFlags = createPostHog('test_group_1')
+    installBrowser(document, '', featureFlags.posthog)
+
+    const started = Date.now()
+    const result = runExperiment('shown-early-test', {
+      selector: '.hero h1',
+      hideUntilReady: true,
+      hideTimeoutMs: 30,
+      featureFlagTimeoutMs: 5_000,
+      log: 'silent',
+      variants: { control: null, test_group_1: 'New headline' },
+    })
+    document.finishLoading()
+
+    expect(await result).toBe('control')
+    expect(Date.now() - started).toBeLessThan(1_000)
+    expect(featureFlags.wasUnsubscribed()).toBe(true)
+    featureFlags.emit()
+    expect(featureFlags.featureFlagReads()).toBe(0)
+  })
+
+  test('does not hide a page that is already older than maxPageAgeMs, and does not count it', async () => {
+    const document = new FakeDocument()
+    document.elements.set('.hero h1', [createElement().element])
+    const featureFlags = createPostHog('test_group_1')
+    installBrowser(document, '', featureFlags.posthog, pagePerformance(9_000, 0))
+
+    const result = runExperiment('too-old-test', {
+      selector: '.hero h1',
+      hideUntilReady: true,
+      maxPageAgeMs: 3_500,
+      log: 'silent',
+      variants: { control: null, test_group_1: 'New headline' },
+    })
+    expect(document.styles).toHaveLength(0)
+    document.finishLoading()
+    expect(await result).toBeNull()
+    expect(featureFlags.featureFlagReads()).toBe(0)
+  })
+
+  test('applies a URL override even on a slow page, for QA', async () => {
+    const document = new FakeDocument()
+    const { element } = createElement()
+    document.elements.set('.hero h1', [element])
+    installBrowser(document, '?override-age-test=test_group_1', createPostHog('control').posthog, pagePerformance(9_000, 0))
+
+    const result = runExperiment('override-age-test', {
+      selector: '.hero h1',
+      hideUntilReady: true,
+      maxPageAgeMs: 3_500,
+      log: 'silent',
+      variants: { control: null, test_group_1: 'New headline' },
+    })
+    document.finishLoading()
+    expect(await result).toBe('test_group_1')
+    expect(element.innerText).toBe('New headline')
+    expect(document.styles).toHaveLength(0)
+  })
+
+  test('measures a prerendered page from the moment the visitor opens it', async () => {
+    const prerendered = new FakeDocument()
+    prerendered.prerendering = true
+    prerendered.elements.set('.hero h1', [createElement().element])
+    const prerenderFlags = createPostHog('test_group_1')
+    installBrowser(prerendered, '', prerenderFlags.posthog, pagePerformance(9_000, 0))
+    const whilePrerendering = runExperiment('prerender-test', {
+      selector: '.hero h1',
+      maxPageAgeMs: 3_500,
+      log: 'silent',
+      variants: { control: null, test_group_1: 'New headline' },
+    })
+    prerendered.finishLoading()
+    await waitForSubscription(prerenderFlags)
+    prerenderFlags.emit()
+    expect(await whilePrerendering).toBe('test_group_1')
+
+    const activated = new FakeDocument()
+    activated.elements.set('.hero h1', [createElement().element])
+    const activatedFlags = createPostHog('test_group_1')
+    installBrowser(activated, '', activatedFlags.posthog, {
+      now: () => 9_000,
+      getEntriesByType: (type: string) => (type === 'navigation' ? [{ responseStart: 100, activationStart: 8_000 }] : []),
+    })
+    const afterActivation = runExperiment('prerender-test', {
+      selector: '.hero h1',
+      maxPageAgeMs: 3_500,
+      log: 'silent',
+      variants: { control: null, test_group_1: 'New headline' },
+    })
+    activated.finishLoading()
+    await waitForSubscription(activatedFlags)
+    activatedFlags.emit()
+    expect(await afterActivation).toBe('test_group_1')
+  })
+
+  test('warns when the element already exists as hiding starts', async () => {
+    const document = new FakeDocument()
+    document.elements.set('.hero h1', [createElement().element])
+    const placementFlags = createPostHog('control')
+    installBrowser(document, '', placementFlags.posthog)
+    const warn = spyOn(console, 'warn').mockImplementation(() => {})
+    const log = spyOn(console, 'log').mockImplementation(() => {})
+    const info = spyOn(console, 'info').mockImplementation(() => {})
+
+    try {
+      const placement = runExperiment('placement-test', {
+        selector: '.hero h1',
+        hideUntilReady: true,
+        log: 'debug',
+        variants: { control: null },
+      })
+      expect(String(warn.mock.calls[0]?.[0])).toContain('already exists when hiding starts')
+      document.finishLoading()
+      await waitForSubscription(placementFlags)
+      placementFlags.emit()
+      expect(await placement).toBe('control')
+    } finally {
+      warn.mockRestore()
+      log.mockRestore()
+      info.mockRestore()
+    }
+  })
+
+  test('rejects the new settings when they are used wrongly', () => {
+    installBrowser(new FakeDocument())
+    expect(() => runExperiment('bad-selector', {
+      selector: '.hero [[h1',
+      variants: { control: null },
+    })).toThrow("selector '.hero [[h1' is not a valid CSS selector.")
+    expect(() => runExperiment('empty-text', {
+      selector: '.hero h1',
+      variants: { control: null, test: ' ' },
+    })).toThrow("Variant 'test' is an empty text. Use null to leave the page unchanged.")
+    expect(() => runExperiment('bad-variant', {
+      variants: { control: null, test: 42 as never },
+    })).toThrow("Variant 'test' must be a function, an array of steps, a text, or null.")
+    expect(() => runExperiment('hide-timeout-alone', {
+      selector: '.hero h1',
+      hideTimeoutMs: 1_000,
+      variants: { control: null },
+    })).toThrow('hideTimeoutMs needs hideUntilReady: true.')
   })
 })
